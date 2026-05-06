@@ -1,8 +1,10 @@
 # Third-party notices
 
-This extension was written as a compact ChatGPT-specific implementation inspired by the architecture of `Noah4ever/ai-chat-speed-booster`.
+This extension is an original ChatGPT-specific implementation inspired by public long-chat optimization approaches.
 
-Reference repository:
+Reference repositories reviewed:
+
 - https://github.com/Noah4ever/ai-chat-speed-booster
+- https://github.com/sergey-pimenov/gpt_performance_optimizer
 
-The reference project is distributed under the MIT License at the time this package was created. No dependency from that repository is bundled here.
+No source file from those repositories is copied verbatim in this package.

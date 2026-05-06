@@ -1,36 +1,46 @@
 (() => {
   "use strict";
 
-  const GLOBAL_PATCH_FLAG = "__CGPT_LONG_CHAT_LOADER_FETCH_PATCHED__";
+  const FETCH_PATCH_FLAG = "__CGPT_LONG_CHAT_LOADER_FETCH_PATCHED__";
+  const HISTORY_PATCH_FLAG = "__CGPT_LONG_CHAT_LOADER_HISTORY_PATCHED__";
   const SETTINGS_KEY = "cgptLongChatLoader.settings";
   const SETTINGS_ATTR = "data-cgpt-lb-settings";
   const TRIMMED_ATTR = "data-cgpt-lb-api-trimmed";
   const KEPT_ATTR = "data-cgpt-lb-api-kept";
+  const STATS_ATTR = "data-cgpt-lb-api-stats";
   const BYPASS_KEY = "cgptLongChatLoader.bypassOnce";
+  const SETTINGS_EVENT = "cgpt-lb-settings";
+  const STATS_EVENT = "cgpt-lb-trim-stats";
+  const LOCATION_EVENT = "cgpt-lb-locationchange";
   const DEBUG_PREFIX = "[ChatGPT Long Chat Loader]";
+  const RESPONSE_CACHE_HARD_MAX = 3;
 
   const DEFAULT_SETTINGS = Object.freeze({
     enabled: true,
     apiTrimEnabled: true,
-    visibleTurns: 6,
-    loadMoreBatch: 6,
-    prefetchBatches: 10,
-    showStatus: true,
+    visibleTurns: 4,
+    loadMoreBatch: 4,
+    prefetchBatches: 2,
+    apiCacheEntries: 0,
+    cssContainmentEnabled: true,
+    showStatus: false,
     debug: false
   });
 
-  const RESPONSE_CACHE_MAX = 5;
   const responseCache = new Map();
   let settingsFromBridge = null;
 
-  if (window[GLOBAL_PATCH_FLAG]) return;
-  window[GLOBAL_PATCH_FLAG] = true;
+  installLocationChangePatch();
 
-  window.addEventListener("cgpt-lb-settings", (event) => {
+  if (window[FETCH_PATCH_FLAG]) return;
+  window[FETCH_PATCH_FLAG] = true;
+
+  window.addEventListener(SETTINGS_EVENT, (event) => {
     const raw = event && typeof event.detail === "string" ? event.detail : null;
     if (!raw) return;
     try {
       settingsFromBridge = normalizeSettings(JSON.parse(raw));
+      pruneCache(settingsFromBridge.apiCacheEntries);
     } catch {
       settingsFromBridge = null;
     }
@@ -49,6 +59,7 @@
 
     const settings = readSettings();
     if (!settings.enabled || !settings.apiTrimEnabled) {
+      clearTrimSignal();
       return originalFetch.call(this, input, init);
     }
 
@@ -59,64 +70,124 @@
       return originalFetch.call(this, input, init);
     }
 
-    const keepVisibleMessages = calculateKeepVisibleMessages(settings);
-    const cacheKey = `${requestUrl}::keep=${keepVisibleMessages}`;
-    const cached = getCached(cacheKey);
+    const keepRenderableMessages = calculateKeepRenderableMessages(settings);
+    const cacheKey = `${requestUrl}::keep=${keepRenderableMessages}`;
+    const cached = getCached(settings, cacheKey);
     if (cached) {
+      const stats = {
+        ...cached.stats,
+        cacheHit: true,
+        timestamp: Date.now(),
+        pageUrl: location.href
+      };
+      signalStats(stats);
       debug(settings, "cache hit", cacheKey);
-      signalTrim(cached.trimmed, cached.keptVisibleMessages);
-      return buildResponseFromCache(cached);
+      return buildResponse(cached.meta, cached.body, true);
     }
 
     const response = await originalFetch.call(this, input, init);
-    if (!response || !response.ok) return response;
-
-    try {
-      const clone = response.clone();
-      let text = await clone.text();
-      if (text.charCodeAt(0) === 0xfeff) text = text.slice(1);
-
-      const data = JSON.parse(text);
-      const trimResult = trimChatGptConversation(data, keepVisibleMessages);
-
-      if (!trimResult.trimmed) {
-        putCached(cacheKey, {
-          body: text,
-          trimmed: false,
-          keptVisibleMessages: trimResult.totalVisibleMessages,
-          status: response.status,
-          statusText: response.statusText,
-          headers: Array.from(new Headers(response.headers).entries()),
-          url: response.url
-        });
-        signalTrim(false, trimResult.totalVisibleMessages);
-        debug(settings, "no trim needed", trimResult.totalVisibleMessages);
-        return response;
-      }
-
-      const body = JSON.stringify(trimResult.data);
-      putCached(cacheKey, {
-        body,
-        trimmed: true,
-        keptVisibleMessages: trimResult.keptVisibleMessages,
-        status: response.status,
-        statusText: response.statusText,
-        headers: Array.from(new Headers(response.headers).entries()),
-        url: response.url
-      });
-
-      signalTrim(true, trimResult.keptVisibleMessages);
-      debug(
-        settings,
-        `trimmed visible messages ${trimResult.totalVisibleMessages} -> ${trimResult.keptVisibleMessages}`,
-        requestUrl
-      );
-      return buildJsonResponse(response, body);
-    } catch (error) {
-      debug(settings, "trim failed; returning original response", error);
+    if (!response || !response.ok || !shouldAttemptJsonTrim(response)) {
       return response;
     }
+
+    const meta = responseMeta(response);
+    let text = "";
+    try {
+      // Read the original body once. Using response.clone().text() keeps an extra body alive and raises peak memory.
+      text = await response.text();
+      if (text.charCodeAt(0) === 0xfeff) text = text.slice(1);
+    } catch (error) {
+      debug(settings, "could not read conversation response body", error);
+      return response;
+    }
+
+    let body = text;
+    let jsonLike = false;
+    let stats = null;
+    const originalChars = approximateLength(text);
+
+    try {
+      const data = JSON.parse(text);
+      jsonLike = true;
+      const trimResult = trimChatGptConversation(data, keepRenderableMessages);
+
+      if (trimResult.trimmed) {
+        body = JSON.stringify(trimResult.data);
+      }
+
+      const trimmedChars = trimResult.trimmed ? approximateLength(body) : originalChars;
+      stats = {
+        trimmed: Boolean(trimResult.trimmed),
+        totalRenderableMessages: trimResult.totalRenderableMessages || 0,
+        keptRenderableMessages: trimResult.keptRenderableMessages || trimResult.totalRenderableMessages || 0,
+        totalVisibleMessages: trimResult.totalRenderableMessages || 0,
+        keptVisibleMessages: trimResult.keptRenderableMessages || trimResult.totalRenderableMessages || 0,
+        totalMappingNodes: trimResult.totalMappingNodes || 0,
+        keptMappingNodes: trimResult.keptMappingNodes || trimResult.totalMappingNodes || 0,
+        originalChars,
+        trimmedChars,
+        originalBytes: originalChars,
+        trimmedBytes: trimmedChars,
+        keepRenderableMessages,
+        keepVisibleMessages: keepRenderableMessages,
+        cacheHit: false,
+        timestamp: Date.now(),
+        pageUrl: location.href,
+        requestUrl
+      };
+
+      signalStats(stats);
+      debug(
+        settings,
+        trimResult.trimmed
+          ? `trimmed renderable messages ${stats.totalRenderableMessages} -> ${stats.keptRenderableMessages}; mapping ${stats.totalMappingNodes} -> ${stats.keptMappingNodes}`
+          : `no trim needed; renderable messages ${stats.totalRenderableMessages}`,
+        requestUrl
+      );
+    } catch (error) {
+      clearTrimSignal();
+      debug(settings, "conversation trim failed; returning unmodified body", error);
+    }
+
+    const rewritten = buildResponse(meta, body, jsonLike);
+    text = "";
+
+    if (stats && stats.trimmed && settings.apiCacheEntries > 0) {
+      putCached(settings, cacheKey, { body, stats, meta });
+    }
+
+    return rewritten;
   };
+
+  function installLocationChangePatch() {
+    if (window[HISTORY_PATCH_FLAG]) return;
+    window[HISTORY_PATCH_FLAG] = true;
+
+    const dispatch = () => {
+      try {
+        window.dispatchEvent(new CustomEvent(LOCATION_EVENT, { detail: location.href }));
+      } catch {
+        // Non-critical.
+      }
+    };
+
+    for (const method of ["pushState", "replaceState"]) {
+      const original = history && history[method];
+      if (typeof original !== "function") continue;
+      try {
+        history[method] = function patchedHistoryMethod(...args) {
+          const result = original.apply(this, args);
+          dispatch();
+          return result;
+        };
+      } catch {
+        // Some environments may expose a non-writable history method.
+      }
+    }
+
+    window.addEventListener("popstate", dispatch, { passive: true });
+    window.addEventListener("hashchange", dispatch, { passive: true });
+  }
 
   function getRequestUrl(input) {
     if (typeof input === "string") return input;
@@ -134,20 +205,47 @@
   }
 
   function isConversationGet(url, method) {
-    if (method !== "GET") return false;
-    if (!url || !url.includes("/backend-api/conversation/")) return false;
-    if (url.includes("/backend-api/conversations")) return false;
-    return location.hostname === "chatgpt.com" || location.hostname.endsWith(".chatgpt.com") || location.hostname === "chat.openai.com";
+    if (method !== "GET" || !url) return false;
+    if (!isSupportedHost(location.hostname)) return false;
+
+    let parsed;
+    try {
+      parsed = new URL(url, location.href);
+    } catch {
+      return false;
+    }
+
+    if (!isSupportedHost(parsed.hostname)) return false;
+    const path = parsed.pathname || "";
+    if (path.includes("/backend-api/conversations")) return false;
+    return /^\/backend-api\/(?:f\/)?conversation\/[^/]+/.test(path);
+  }
+
+  function isSupportedHost(hostname) {
+    return hostname === "chatgpt.com" || hostname.endsWith(".chatgpt.com") || hostname === "chat.openai.com";
+  }
+
+  function shouldAttemptJsonTrim(response) {
+    const contentType = String(response.headers && response.headers.get("content-type") || "").toLowerCase();
+    if (!contentType) return true;
+    if (contentType.includes("json")) return true;
+    if (contentType.includes("text/plain")) return true;
+    return false;
   }
 
   function normalizeSettings(value) {
     const merged = { ...DEFAULT_SETTINGS, ...(value && typeof value === "object" ? value : {}) };
+    const cacheValue = Object.prototype.hasOwnProperty.call(merged, "apiCacheEntries")
+      ? merged.apiCacheEntries
+      : merged.responseCacheMax;
     return {
       enabled: Boolean(merged.enabled),
       apiTrimEnabled: Boolean(merged.apiTrimEnabled),
       visibleTurns: clampInt(merged.visibleTurns, 1, 100, DEFAULT_SETTINGS.visibleTurns),
       loadMoreBatch: clampInt(merged.loadMoreBatch, 1, 100, DEFAULT_SETTINGS.loadMoreBatch),
       prefetchBatches: clampInt(merged.prefetchBatches, 0, 30, DEFAULT_SETTINGS.prefetchBatches),
+      apiCacheEntries: clampInt(cacheValue, 0, RESPONSE_CACHE_HARD_MAX, DEFAULT_SETTINGS.apiCacheEntries),
+      cssContainmentEnabled: Boolean(merged.cssContainmentEnabled ?? merged.contentVisibilityEnabled),
       showStatus: Boolean(merged.showStatus),
       debug: Boolean(merged.debug)
     };
@@ -181,8 +279,7 @@
     return Math.min(max, Math.max(min, n));
   }
 
-  function calculateKeepVisibleMessages(settings) {
-    // ChatGPT usually renders one DOM turn per message; a user/assistant exchange is roughly two messages.
+  function calculateKeepRenderableMessages(settings) {
     const visible = settings.visibleTurns * 2;
     const buffered = settings.loadMoreBatch * settings.prefetchBatches * 2;
     return Math.max(2, visible + buffered);
@@ -200,62 +297,90 @@
     return false;
   }
 
-  function signalTrim(trimmed, keptVisibleMessages) {
-    if (!document.documentElement) return;
-    if (trimmed) {
-      document.documentElement.setAttribute(TRIMMED_ATTR, "true");
-      document.documentElement.setAttribute(KEPT_ATTR, String(keptVisibleMessages || ""));
+  function signalStats(stats) {
+    const root = document.documentElement;
+    if (!root || !stats) return;
+
+    if (stats.trimmed) {
+      root.setAttribute(TRIMMED_ATTR, "true");
+      root.setAttribute(KEPT_ATTR, String(stats.keptRenderableMessages || stats.keptVisibleMessages || ""));
     } else {
-      clearTrimSignal();
+      root.removeAttribute(TRIMMED_ATTR);
+      root.removeAttribute(KEPT_ATTR);
+    }
+
+    try {
+      const raw = JSON.stringify(stats);
+      root.setAttribute(STATS_ATTR, raw);
+      window.dispatchEvent(new CustomEvent(STATS_EVENT, { detail: raw }));
+    } catch {
+      root.removeAttribute(STATS_ATTR);
     }
   }
 
   function clearTrimSignal() {
-    if (!document.documentElement) return;
-    document.documentElement.removeAttribute(TRIMMED_ATTR);
-    document.documentElement.removeAttribute(KEPT_ATTR);
+    const root = document.documentElement;
+    if (!root) return;
+    root.removeAttribute(TRIMMED_ATTR);
+    root.removeAttribute(KEPT_ATTR);
+    root.removeAttribute(STATS_ATTR);
   }
 
-  function putCached(key, value) {
+  function putCached(settings, key, value) {
+    const max = settings.apiCacheEntries;
+    if (max <= 0) return;
     responseCache.delete(key);
     responseCache.set(key, value);
-    while (responseCache.size > RESPONSE_CACHE_MAX) {
+    pruneCache(max);
+  }
+
+  function getCached(settings, key) {
+    const max = settings.apiCacheEntries;
+    if (max <= 0) {
+      if (responseCache.size) responseCache.clear();
+      return null;
+    }
+    const entry = responseCache.get(key);
+    if (!entry) {
+      pruneCache(max);
+      return null;
+    }
+    responseCache.delete(key);
+    responseCache.set(key, entry);
+    pruneCache(max);
+    return entry;
+  }
+
+  function pruneCache(max) {
+    const cap = Math.max(0, Math.min(RESPONSE_CACHE_HARD_MAX, Number(max) || 0));
+    while (responseCache.size > cap) {
       const oldestKey = responseCache.keys().next().value;
       responseCache.delete(oldestKey);
     }
   }
 
-  function getCached(key) {
-    const entry = responseCache.get(key);
-    if (!entry) return null;
-    responseCache.delete(key);
-    responseCache.set(key, entry);
-    return entry;
+  function responseMeta(response) {
+    return {
+      status: response.status,
+      statusText: response.statusText,
+      headers: Array.from(new Headers(response.headers).entries()),
+      url: response.url
+    };
   }
 
-  function buildResponseFromCache(entry) {
-    const headers = new Headers(entry.headers || []);
-    const response = new Response(entry.body, {
-      status: entry.status,
-      statusText: entry.statusText,
-      headers
-    });
-    defineResponseUrl(response, entry.url);
-    return response;
-  }
-
-  function buildJsonResponse(original, body) {
-    const headers = new Headers(original.headers);
-    headers.set("content-type", "application/json; charset=utf-8");
+  function buildResponse(originalOrMeta, body, jsonLike) {
+    const meta = originalOrMeta instanceof Response ? responseMeta(originalOrMeta) : originalOrMeta;
+    const headers = new Headers(meta.headers || []);
+    if (jsonLike) headers.set("content-type", "application/json; charset=utf-8");
     headers.delete("content-length");
     headers.delete("content-encoding");
 
     const response = new Response(body, {
-      status: original.status,
-      statusText: original.statusText,
+      status: meta.status,
+      statusText: meta.statusText,
       headers
     });
-    defineResponseUrl(response, original.url);
+    defineResponseUrl(response, meta.url);
     return response;
   }
 
@@ -263,40 +388,48 @@
     try {
       Object.defineProperty(response, "url", { value: url || location.href });
     } catch {
-      // Non-critical. Some engines may expose url as non-configurable.
+      // Non-critical.
     }
   }
 
-  function trimChatGptConversation(data, keepVisibleMessages) {
-    if (!data || typeof data !== "object") {
-      return { trimmed: false, data, totalVisibleMessages: 0, keptVisibleMessages: 0 };
-    }
+  function approximateLength(value) {
+    // Avoid TextEncoder/Blob here: both can allocate another full-size buffer.
+    return String(value || "").length;
+  }
+
+  function trimChatGptConversation(data, keepRenderableMessages) {
+    if (!data || typeof data !== "object") return emptyTrimResult(data);
 
     const mapping = data.mapping;
     const currentNode = data.current_node;
     if (!mapping || typeof mapping !== "object" || !currentNode || !mapping[currentNode]) {
-      return { trimmed: false, data, totalVisibleMessages: 0, keptVisibleMessages: 0 };
+      return emptyTrimResult(data, countOwnProperties(mapping));
     }
 
+    const totalMappingNodes = countOwnProperties(mapping);
     const chain = buildCurrentChain(mapping, currentNode);
-    if (chain.length === 0) {
-      return { trimmed: false, data, totalVisibleMessages: 0, keptVisibleMessages: 0 };
+    if (!chain.length) return emptyTrimResult(data, totalMappingNodes);
+
+    const renderableIds = chain.filter((id) => isRenderableChatNode(mapping[id]));
+    const totalRenderableMessages = renderableIds.length;
+    if (totalRenderableMessages <= keepRenderableMessages) {
+      return {
+        trimmed: false,
+        data,
+        totalRenderableMessages,
+        keptRenderableMessages: totalRenderableMessages,
+        totalMappingNodes,
+        keptMappingNodes: totalMappingNodes
+      };
     }
 
-    const visibleIds = chain.filter((id) => isVisibleChatNode(mapping[id]));
-    const totalVisibleMessages = visibleIds.length;
-    if (totalVisibleMessages <= keepVisibleMessages) {
-      return { trimmed: false, data, totalVisibleMessages, keptVisibleMessages: totalVisibleMessages };
-    }
-
-    const cutoffVisibleId = visibleIds[visibleIds.length - keepVisibleMessages];
-    const cutoffIndex = Math.max(0, chain.indexOf(cutoffVisibleId));
+    const cutoffRenderableId = renderableIds[renderableIds.length - keepRenderableMessages];
+    const cutoffIndex = Math.max(0, chain.indexOf(cutoffRenderableId));
     const keptIds = new Set();
 
-    // Keep root/system/non-visible metadata before the cutoff. Drop old visible user/assistant/tool nodes.
     for (let i = 0; i < cutoffIndex; i += 1) {
       const id = chain[i];
-      if (i === 0 || !isVisibleChatNode(mapping[id])) keptIds.add(id);
+      if (shouldKeepBeforeCutoff(mapping[id], i)) keptIds.add(id);
     }
 
     for (let i = cutoffIndex; i < chain.length; i += 1) {
@@ -305,16 +438,26 @@
 
     const keptChain = chain.filter((id) => keptIds.has(id));
     if (keptChain.length === chain.length) {
-      return { trimmed: false, data, totalVisibleMessages, keptVisibleMessages: totalVisibleMessages };
+      return {
+        trimmed: false,
+        data,
+        totalRenderableMessages,
+        keptRenderableMessages: totalRenderableMessages,
+        totalMappingNodes,
+        keptMappingNodes: totalMappingNodes
+      };
     }
 
     const newMapping = {};
     for (let i = 0; i < keptChain.length; i += 1) {
       const id = keptChain[i];
-      const clonedNode = deepClone(mapping[id]);
-      clonedNode.parent = i > 0 ? keptChain[i - 1] : null;
-      clonedNode.children = i < keptChain.length - 1 ? [keptChain[i + 1]] : [];
-      newMapping[id] = clonedNode;
+      const originalNode = mapping[id];
+      if (!originalNode || typeof originalNode !== "object") continue;
+      newMapping[id] = {
+        ...originalNode,
+        parent: i > 0 ? keptChain[i - 1] : null,
+        children: i < keptChain.length - 1 ? [keptChain[i + 1]] : []
+      };
     }
 
     const result = { ...data, mapping: newMapping };
@@ -323,9 +466,31 @@
     return {
       trimmed: true,
       data: result,
-      totalVisibleMessages,
-      keptVisibleMessages: keptChain.filter((id) => isVisibleChatNode(newMapping[id])).length
+      totalRenderableMessages,
+      keptRenderableMessages: keptChain.filter((id) => isRenderableChatNode(newMapping[id])).length,
+      totalMappingNodes,
+      keptMappingNodes: countOwnProperties(newMapping)
     };
+  }
+
+  function emptyTrimResult(data, totalMappingNodes = 0) {
+    return {
+      trimmed: false,
+      data,
+      totalRenderableMessages: 0,
+      keptRenderableMessages: 0,
+      totalMappingNodes,
+      keptMappingNodes: totalMappingNodes
+    };
+  }
+
+  function countOwnProperties(value) {
+    if (!value || typeof value !== "object") return 0;
+    let count = 0;
+    for (const key in value) {
+      if (Object.prototype.hasOwnProperty.call(value, key)) count += 1;
+    }
+    return count;
   }
 
   function buildCurrentChain(mapping, currentNode) {
@@ -342,23 +507,29 @@
     return reversed.reverse();
   }
 
-  function isVisibleChatNode(node) {
+  function shouldKeepBeforeCutoff(node, index) {
+    if (index === 0) return true;
+    if (!node || typeof node !== "object") return false;
+    const message = node.message;
+    if (!message || typeof message !== "object") return true;
+    const role = message.author && message.author.role;
+    return role === "system" || role === "developer";
+  }
+
+  function isRenderableChatNode(node) {
     if (!node || typeof node !== "object") return false;
     const message = node.message;
     if (!message || typeof message !== "object") return false;
     const role = message.author && message.author.role;
-    return role === "user" || role === "assistant" || role === "tool";
-  }
+    if (role !== "user" && role !== "assistant") return false;
 
-  function deepClone(value) {
-    if (typeof structuredClone === "function") {
-      try {
-        return structuredClone(value);
-      } catch {
-        // Fall through.
-      }
-    }
-    return JSON.parse(JSON.stringify(value));
+    const metadata = message.metadata || {};
+    if (metadata.is_visually_hidden_from_conversation === true) return false;
+    if (metadata.is_hidden_from_ui === true) return false;
+
+    const contentType = message.content && message.content.content_type;
+    if (contentType === "model_editable_context" || contentType === "user_editable_context") return false;
+    return true;
   }
 
   function debug(settings, ...args) {

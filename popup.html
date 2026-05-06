@@ -7,7 +7,7 @@
   <style>
     :root { color-scheme: light dark; }
     body {
-      width: 300px;
+      width: 350px;
       margin: 0;
       padding: 14px;
       font: 13px/1.4 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
@@ -15,6 +15,11 @@
     h1 {
       margin: 0 0 10px;
       font-size: 15px;
+      line-height: 1.2;
+    }
+    h2 {
+      margin: 0 0 8px;
+      font-size: 13px;
       line-height: 1.2;
     }
     label {
@@ -33,25 +38,76 @@
       width: 16px;
       height: 16px;
     }
-    .hint {
-      margin-top: 12px;
-      color: color-mix(in srgb, CanvasText 68%, Canvas 32%);
-      font-size: 12px;
+    button {
+      padding: 5px 8px;
+      border: 1px solid color-mix(in srgb, CanvasText 20%, Canvas 80%);
+      border-radius: 8px;
+      background: Canvas;
+      color: CanvasText;
+      font: inherit;
+      cursor: pointer;
     }
-    .row {
+    .row,
+    .metrics {
       border-top: 1px solid color-mix(in srgb, CanvasText 14%, Canvas 86%);
       padding-top: 8px;
+      margin-top: 8px;
+    }
+    .metrics {
+      border: 1px solid color-mix(in srgb, CanvasText 14%, Canvas 86%);
+      border-radius: 10px;
+      padding: 10px;
+      background: color-mix(in srgb, Canvas 96%, CanvasText 4%);
+    }
+    .metric-top {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+    }
+    .metric-main {
+      font-size: 20px;
+      line-height: 1.15;
+      font-weight: 700;
+      margin: 5px 0;
+    }
+    .metric-sub,
+    .metric-line,
+    .hint,
+    #saved {
+      color: color-mix(in srgb, CanvasText 72%, Canvas 28%);
+      font-size: 12px;
+    }
+    .metric-line {
+      display: flex;
+      justify-content: space-between;
+      gap: 10px;
+      margin-top: 5px;
+    }
+    .metric-line strong {
+      text-align: right;
+    }
+    .hint {
+      margin-top: 12px;
     }
     #saved {
       min-height: 16px;
       margin-top: 8px;
-      font-size: 12px;
-      color: color-mix(in srgb, CanvasText 70%, Canvas 30%);
     }
   </style>
 </head>
 <body>
   <h1>ChatGPT Long Chat Loader</h1>
+
+  <section id="metrics" class="metrics" aria-live="polite">
+    <div class="metric-top">
+      <h2>현재 탭 추정</h2>
+      <button id="refreshMetrics" type="button">다시 계산</button>
+    </div>
+    <div id="metricMain" class="metric-main">계산 중</div>
+    <div id="metricSub" class="metric-sub">팝업이 열려 있을 때만 계산합니다.</div>
+    <div id="metricLines"></div>
+  </section>
 
   <label>
     <span>확장 기능 사용</span>
@@ -61,6 +117,11 @@
   <label>
     <span>초기 API 응답 줄이기</span>
     <input id="apiTrimEnabled" type="checkbox">
+  </label>
+
+  <label>
+    <span>CSS 렌더링 containment</span>
+    <input id="cssContainmentEnabled" type="checkbox">
   </label>
 
   <label>
@@ -83,6 +144,11 @@
       <span>API 사전 보관 배치</span>
       <input id="prefetchBatches" type="number" min="0" max="30" step="1">
     </label>
+
+    <label>
+      <span>응답 본문 캐시 수</span>
+      <input id="apiCacheEntries" type="number" min="0" max="3" step="1">
+    </label>
   </div>
 
   <label>
@@ -91,7 +157,7 @@
   </label>
 
   <div class="hint">
-    API 응답 줄이기를 끄면 초기 렌더링은 느릴 수 있지만, DOM 숨김만 적용됩니다.
+    RAM 절감을 위해 응답 본문 캐시는 기본 0입니다. 과거 전체 대화가 필요하면 페이지 상단의 전체 대화 로드를 사용합니다.
   </div>
   <div id="saved"></div>
 

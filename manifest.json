@@ -1,10 +1,12 @@
 {
   "manifest_version": 3,
   "name": "ChatGPT Long Chat Loader",
-  "description": "Reduce ChatGPT long-conversation loading by trimming initial conversation data and windowing old DOM messages.",
-  "version": "0.1.0",
+  "description": "Reduce ChatGPT long-chat loading and RAM pressure with API trimming, DOM windowing, route-aware observers, and popup-only estimates.",
+  "version": "0.3.0",
   "minimum_chrome_version": "102",
-  "permissions": ["storage"],
+  "permissions": [
+    "storage"
+  ],
   "host_permissions": [
     "https://chatgpt.com/*",
     "https://chat.openai.com/*"
@@ -25,7 +27,9 @@
         "https://chatgpt.com/*",
         "https://chat.openai.com/*"
       ],
-      "js": ["mainWorld.js"],
+      "js": [
+        "mainWorld.js"
+      ],
       "run_at": "document_start",
       "world": "MAIN"
     },
@@ -34,9 +38,13 @@
         "https://chatgpt.com/*",
         "https://chat.openai.com/*"
       ],
-      "js": ["content.js"],
-      "css": ["content.css"],
-      "run_at": "document_idle"
+      "js": [
+        "content.js"
+      ],
+      "css": [
+        "content.css"
+      ],
+      "run_at": "document_start"
     }
   ]
 }

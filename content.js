@@ -5,41 +5,67 @@
   const SETTINGS_ATTR = "data-cgpt-lb-settings";
   const TRIMMED_ATTR = "data-cgpt-lb-api-trimmed";
   const KEPT_ATTR = "data-cgpt-lb-api-kept";
+  const STATS_ATTR = "data-cgpt-lb-api-stats";
   const BYPASS_KEY = "cgptLongChatLoader.bypassOnce";
+  const SETTINGS_EVENT = "cgpt-lb-settings";
+  const STATS_EVENT = "cgpt-lb-trim-stats";
+  const LOCATION_EVENT = "cgpt-lb-locationchange";
   const HIDDEN_CLASS = "cgpt-lb-hidden";
+  const CONTAINED_CLASS = "cgpt-lb-contained";
   const LOAD_MORE_ID = "cgpt-lb-load-more";
   const STATUS_ID = "cgpt-lb-status";
+  const TURN_SELECTOR = '[data-testid^="conversation-turn-"]';
+  const ROLE_SELECTOR = "[data-message-author-role]";
 
   const DEFAULT_SETTINGS = Object.freeze({
     enabled: true,
     apiTrimEnabled: true,
-    visibleTurns: 6,
-    loadMoreBatch: 6,
-    prefetchBatches: 10,
-    showStatus: true,
+    visibleTurns: 4,
+    loadMoreBatch: 4,
+    prefetchBatches: 2,
+    apiCacheEntries: 0,
+    cssContainmentEnabled: true,
+    showStatus: false,
     debug: false
   });
 
   let settings = { ...DEFAULT_SETTINGS };
-  let messageElements = [];
   let extraVisibleMessages = 0;
   let apiTrimmedCurrentConversation = false;
+  let lastApiStats = null;
   let lastUrl = location.href;
+  let lastDomMetrics = { total: 0, hidden: 0, visible: 0 };
   let scanScheduled = false;
+  let scanTimer = 0;
+  let lastScanAt = 0;
   let loadMoreButton = null;
   let statusBadge = null;
   let observer = null;
+  let observerTarget = null;
+  let navigationTimer = 0;
 
   boot();
 
   async function boot() {
     settings = await loadSettings();
     writeSettingsBridge();
-    ensureUi();
-    scanAndApply();
-    startObserver();
-    startNavigationWatcher();
     listenForSettingsChanges();
+    listenForPopupMetrics();
+    listenForTrimStats();
+    startNavigationWatcher();
+
+    if (document.readyState === "loading") {
+      document.addEventListener("DOMContentLoaded", () => {
+        ensureObserverTarget();
+        scheduleScan(true);
+      }, { once: true });
+    }
+
+    ensureObserverTarget();
+    scheduleScan(true);
+    document.addEventListener("visibilitychange", () => {
+      if (!document.hidden) scheduleScan();
+    }, { passive: true });
   }
 
   function loadSettings() {
@@ -48,8 +74,8 @@
         resolve({ ...DEFAULT_SETTINGS });
         return;
       }
-      chrome.storage.local.get(DEFAULT_SETTINGS, (value) => {
-        resolve(normalizeSettings(value));
+      chrome.storage.local.get(null, (value) => {
+        resolve(normalizeSettings(value || {}));
       });
     });
   }
@@ -60,12 +86,17 @@
 
   function normalizeSettings(value) {
     const merged = { ...DEFAULT_SETTINGS, ...(value && typeof value === "object" ? value : {}) };
+    const cacheValue = Object.prototype.hasOwnProperty.call(merged, "apiCacheEntries")
+      ? merged.apiCacheEntries
+      : merged.responseCacheMax;
     return {
       enabled: Boolean(merged.enabled),
       apiTrimEnabled: Boolean(merged.apiTrimEnabled),
       visibleTurns: clampInt(merged.visibleTurns, 1, 100, DEFAULT_SETTINGS.visibleTurns),
       loadMoreBatch: clampInt(merged.loadMoreBatch, 1, 100, DEFAULT_SETTINGS.loadMoreBatch),
       prefetchBatches: clampInt(merged.prefetchBatches, 0, 30, DEFAULT_SETTINGS.prefetchBatches),
+      apiCacheEntries: clampInt(cacheValue, 0, 3, DEFAULT_SETTINGS.apiCacheEntries),
+      cssContainmentEnabled: Boolean(merged.cssContainmentEnabled ?? merged.contentVisibilityEnabled),
       showStatus: Boolean(merged.showStatus),
       debug: Boolean(merged.debug)
     };
@@ -88,7 +119,7 @@
       document.documentElement.setAttribute(SETTINGS_ATTR, raw);
     }
     try {
-      window.dispatchEvent(new CustomEvent("cgpt-lb-settings", { detail: raw }));
+      window.dispatchEvent(new CustomEvent(SETTINGS_EVENT, { detail: raw }));
     } catch {
       // Ignore event bridge failures.
     }
@@ -106,30 +137,48 @@
           changed = true;
         }
       }
+      if (Object.prototype.hasOwnProperty.call(changes, "responseCacheMax")) {
+        next.apiCacheEntries = changes.responseCacheMax.newValue;
+        changed = true;
+      }
       if (!changed) return;
       settings = normalizeSettings(next);
       writeSettingsBridge();
+      ensureObserverTarget();
       scanAndApply();
     });
   }
 
-  function startObserver() {
-    const target = document.body || document.documentElement;
-    if (!target) return;
-    observer = new MutationObserver((mutations) => {
-      for (const mutation of mutations) {
-        if (mutation.type === "childList" && (mutation.addedNodes.length || mutation.removedNodes.length)) {
-          scheduleScan();
-          return;
-        }
+  function listenForPopupMetrics() {
+    if (typeof chrome === "undefined" || !chrome.runtime || !chrome.runtime.onMessage) return;
+    chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+      if (!message || message.type !== "cgpt-lb-get-metrics") return false;
+      try {
+        scanAndApply();
+        sendResponse(collectMetricsForPopup());
+      } catch (error) {
+        sendResponse({ ok: false, error: String(error && error.message ? error.message : error) });
       }
+      return true;
     });
-    observer.observe(target, { childList: true, subtree: true });
+  }
+
+  function listenForTrimStats() {
+    window.addEventListener(STATS_EVENT, (event) => {
+      const raw = event && typeof event.detail === "string" ? event.detail : "";
+      const parsed = parseStats(raw);
+      if (!statsApplyToThisPage(parsed)) return;
+      lastApiStats = parsed;
+      apiTrimmedCurrentConversation = Boolean(parsed && parsed.trimmed);
+      scheduleScan();
+    });
   }
 
   function startNavigationWatcher() {
+    window.addEventListener(LOCATION_EVENT, checkNavigation, { passive: true });
     window.addEventListener("popstate", checkNavigation, { passive: true });
-    setInterval(checkNavigation, 700);
+    window.addEventListener("hashchange", checkNavigation, { passive: true });
+    navigationTimer = window.setInterval(checkNavigation, 3000);
   }
 
   function checkNavigation() {
@@ -137,106 +186,225 @@
     lastUrl = location.href;
     extraVisibleMessages = 0;
     apiTrimmedCurrentConversation = false;
-    messageElements = [];
+    lastApiStats = null;
+    lastDomMetrics = { total: 0, hidden: 0, visible: 0 };
     hideLoadMore();
-    scheduleScan();
+    ensureObserverTarget();
+    scheduleScan(true);
   }
 
-  function scheduleScan() {
-    if (scanScheduled) return;
-    scanScheduled = true;
-    const run = () => {
-      scanScheduled = false;
-      scanAndApply();
-    };
-    if (typeof requestIdleCallback === "function") {
-      requestIdleCallback(run, { timeout: 500 });
-    } else {
-      setTimeout(run, 120);
+  function isLikelyChatSurface() {
+    const path = location.pathname || "/";
+    return path === "/" || path.startsWith("/c/") || path.includes("/c/") || path.startsWith("/share/") || path.startsWith("/g/");
+  }
+
+  function ensureObserverTarget() {
+    if (!isLikelyChatSurface()) {
+      showAllKnownTurns();
+      stopObserver();
+      removeStatusBadge();
+      return;
     }
+
+    const target = getMessageScope() || document.body || document.documentElement;
+    if (!target || observerTarget === target) return;
+
+    stopObserver();
+    observerTarget = target;
+    observer = new MutationObserver((mutations) => {
+      for (const mutation of mutations) {
+        if (isRelevantMutation(mutation)) {
+          scheduleScan();
+          return;
+        }
+      }
+    });
+    observer.observe(target, { childList: true, subtree: true });
+    debug("observer target", target.tagName || target.nodeName);
+  }
+
+  function stopObserver() {
+    if (observer) observer.disconnect();
+    observer = null;
+    observerTarget = null;
+  }
+
+  function isRelevantMutation(mutation) {
+    if (mutation.type !== "childList") return false;
+    if (mutation.target instanceof Element && isExtensionUi(mutation.target)) return false;
+
+    for (const node of mutation.addedNodes) {
+      if (isRelevantNode(node)) return true;
+    }
+    for (const node of mutation.removedNodes) {
+      if (isRelevantNode(node)) return true;
+    }
+    return false;
+  }
+
+  function isRelevantNode(node) {
+    if (!(node instanceof Element)) return false;
+    if (isExtensionUi(node)) return false;
+    if (node.matches && (node.matches(TURN_SELECTOR) || node.matches(ROLE_SELECTOR))) return true;
+    return Boolean(node.querySelector && node.querySelector(`${TURN_SELECTOR}, ${ROLE_SELECTOR}`));
+  }
+
+  function scheduleScan(immediate) {
+    if (!isLikelyChatSurface()) {
+      showAllKnownTurns();
+      stopObserver();
+      return;
+    }
+
+    if (scanScheduled && !immediate) return;
+    if (scanTimer) clearTimeout(scanTimer);
+
+    scanScheduled = true;
+    const now = Date.now();
+    const delay = immediate ? 0 : Math.max(0, 550 - (now - lastScanAt));
+
+    scanTimer = window.setTimeout(() => {
+      scanTimer = 0;
+      const run = () => {
+        scanScheduled = false;
+        lastScanAt = Date.now();
+        scanAndApply();
+        ensureObserverTarget();
+      };
+      if (!immediate && typeof requestIdleCallback === "function") {
+        requestIdleCallback(run, { timeout: 800 });
+      } else {
+        run();
+      }
+    }, delay);
   }
 
   function scanAndApply() {
     consumeApiTrimSignal();
-    messageElements = queryMessageTurns();
-    applyVisibility();
+    const turns = queryMessageTurns();
+    applyVisibility(turns);
   }
 
   function consumeApiTrimSignal() {
     const root = document.documentElement;
     if (!root) return;
+
+    const stats = readApiStatsFromRoot();
+    if (statsApplyToThisPage(stats)) {
+      lastApiStats = stats || lastApiStats;
+      if (stats && stats.trimmed === false) apiTrimmedCurrentConversation = false;
+    }
+
     if (root.hasAttribute(TRIMMED_ATTR)) {
       apiTrimmedCurrentConversation = true;
       root.removeAttribute(TRIMMED_ATTR);
     }
   }
 
-  function queryMessageTurns() {
-    const candidates = [];
-    collectAll(candidates, '[data-testid^="conversation-turn-"]');
-    collectAll(candidates, 'article:has([data-message-author-role])');
-    collectAll(candidates, 'section:has([data-message-author-role])');
+  function readApiStatsFromRoot() {
+    const root = document.documentElement;
+    if (!root) return null;
+    return parseStats(root.getAttribute(STATS_ATTR));
+  }
 
-    const roleNodes = safeQueryAll('[data-message-author-role]');
+  function readApiStats() {
+    const fromRoot = readApiStatsFromRoot();
+    if (statsApplyToThisPage(fromRoot)) {
+      lastApiStats = fromRoot || lastApiStats;
+    }
+    return lastApiStats && statsApplyToThisPage(lastApiStats) ? { ...lastApiStats } : null;
+  }
+
+  function parseStats(raw) {
+    if (!raw || typeof raw !== "string") return null;
+    try {
+      const parsed = JSON.parse(raw);
+      return parsed && typeof parsed === "object" ? parsed : null;
+    } catch {
+      return null;
+    }
+  }
+
+  function statsApplyToThisPage(stats) {
+    return !stats || !stats.pageUrl || stats.pageUrl === location.href;
+  }
+
+  function getMessageScope() {
+    return (
+      document.querySelector("main") ||
+      document.querySelector("[data-scroll-root]") ||
+      document.querySelector('[role="main"]') ||
+      document.body ||
+      document.documentElement
+    );
+  }
+
+  function queryMessageTurns() {
+    const scope = getMessageScope();
+    const primary = safeQueryAll(TURN_SELECTOR, scope);
+    if (primary.length) return sortDocumentOrder(uniqueElements(primary)).filter((el) => isAttached(el) && !isExtensionUi(el));
+
+    const candidates = [];
+    const roleNodes = safeQueryAll(ROLE_SELECTOR, scope);
     for (const node of roleNodes) {
-      const turn = node.closest('[data-testid^="conversation-turn-"], article, section');
+      const turn = node.closest(`${TURN_SELECTOR}, article, section, [role="article"]`);
       if (turn instanceof HTMLElement) candidates.push(turn);
     }
 
-    return dedupeAndSort(candidates).filter((el) => isAttached(el) && !isExtensionUi(el));
+    return removeNested(sortDocumentOrder(uniqueElements(candidates))).filter((el) => isAttached(el) && !isExtensionUi(el));
   }
 
-  function collectAll(target, selector) {
-    const found = safeQueryAll(selector);
-    for (const el of found) {
-      if (el instanceof HTMLElement) target.push(el);
-    }
-  }
-
-  function safeQueryAll(selector) {
+  function safeQueryAll(selector, scope) {
     try {
-      return Array.from(document.querySelectorAll(selector));
+      const root = scope && typeof scope.querySelectorAll === "function" ? scope : document;
+      return Array.from(root.querySelectorAll(selector)).filter((el) => el instanceof HTMLElement);
     } catch {
       return [];
     }
   }
 
-  function dedupeAndSort(elements) {
-    const set = new Set(elements.filter((el) => el instanceof HTMLElement));
-    const ordered = Array.from(set);
+  function uniqueElements(elements) {
+    return Array.from(new Set(elements.filter((el) => el instanceof HTMLElement)));
+  }
 
-    // Remove nested duplicates. Prefer the outer conversation-turn/article/section wrapper.
-    const withoutNested = ordered.filter((el) => {
-      for (const other of ordered) {
-        if (el !== other && other.contains(el)) return false;
-      }
-      return true;
-    });
-
-    withoutNested.sort((a, b) => {
+  function sortDocumentOrder(elements) {
+    const ordered = elements.slice();
+    ordered.sort((a, b) => {
       if (a === b) return 0;
       const pos = a.compareDocumentPosition(b);
       return pos & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1;
     });
-    return withoutNested;
+    return ordered;
+  }
+
+  function removeNested(elements) {
+    const result = [];
+    for (const el of elements) {
+      if (!result.some((parent) => parent.contains(el))) result.push(el);
+    }
+    return result;
   }
 
   function isAttached(el) {
-    return document.documentElement && document.documentElement.contains(el);
+    return Boolean(document.documentElement && document.documentElement.contains(el));
   }
 
   function isExtensionUi(el) {
-    return Boolean(el.closest(`#${LOAD_MORE_ID}, #${STATUS_ID}`));
+    return Boolean(el && el.closest && el.closest(`#${LOAD_MORE_ID}, #${STATUS_ID}`));
   }
 
-  function applyVisibility() {
+  function applyVisibility(turns) {
     ensureUi();
-    const total = messageElements.length;
+    const total = turns.length;
 
     if (!settings.enabled || total === 0) {
-      for (const el of messageElements) showElement(el);
+      for (const el of turns) {
+        removeContainment(el);
+        showElement(el);
+      }
       hideLoadMore();
       updateStatus(0, total);
+      lastDomMetrics = { total, hidden: 0, visible: total };
       return;
     }
 
@@ -245,13 +413,35 @@
     const hiddenCount = Math.max(0, total - visibleLimit);
 
     for (let i = 0; i < total; i += 1) {
-      const el = messageElements[i];
+      const el = turns[i];
+      if (settings.cssContainmentEnabled) applyContainment(el);
+      else removeContainment(el);
+
       if (i < hiddenCount) hideElement(el);
       else showElement(el);
     }
 
-    updateLoadMore(hiddenCount);
+    updateLoadMore(hiddenCount, turns);
     updateStatus(hiddenCount, total);
+    lastDomMetrics = { total, hidden: hiddenCount, visible: Math.max(0, total - hiddenCount) };
+  }
+
+  function showAllKnownTurns() {
+    const turns = queryMessageTurns();
+    for (const el of turns) {
+      removeContainment(el);
+      showElement(el);
+    }
+    hideLoadMore();
+    lastDomMetrics = { total: turns.length, hidden: 0, visible: turns.length };
+  }
+
+  function applyContainment(el) {
+    if (!el.classList.contains(CONTAINED_CLASS)) el.classList.add(CONTAINED_CLASS);
+  }
+
+  function removeContainment(el) {
+    if (el.classList.contains(CONTAINED_CLASS)) el.classList.remove(CONTAINED_CLASS);
   }
 
   function hideElement(el) {
@@ -271,20 +461,33 @@
       loadMoreButton = document.createElement("button");
       loadMoreButton.id = LOAD_MORE_ID;
       loadMoreButton.type = "button";
+      loadMoreButton.hidden = true;
     }
+
+    if (!settings.showStatus) {
+      removeStatusBadge();
+      return;
+    }
+
+    if (!document.body) return;
     if (!statusBadge || !document.documentElement.contains(statusBadge)) {
       statusBadge = document.createElement("div");
       statusBadge.id = STATUS_ID;
       statusBadge.setAttribute("role", "status");
       statusBadge.setAttribute("aria-live", "polite");
-      (document.body || document.documentElement).appendChild(statusBadge);
+      document.body.appendChild(statusBadge);
     }
   }
 
-  function updateLoadMore(hiddenCount) {
+  function removeStatusBadge() {
+    if (statusBadge && statusBadge.parentElement) statusBadge.remove();
+    statusBadge = null;
+  }
+
+  function updateLoadMore(hiddenCount, turns) {
     if (!loadMoreButton) return;
 
-    const firstVisible = messageElements.find((el) => !el.classList.contains(HIDDEN_CLASS));
+    const firstVisible = turns.find((el) => !el.classList.contains(HIDDEN_CLASS));
     const container = firstVisible && firstVisible.parentElement;
 
     if (hiddenCount > 0) {
@@ -292,8 +495,10 @@
       loadMoreButton.textContent = `이전 메시지 ${Math.min(hiddenCount, settings.loadMoreBatch * 2)}개 더 보기 · 숨김 ${hiddenCount}개`;
       loadMoreButton.onclick = () => {
         extraVisibleMessages += settings.loadMoreBatch * 2;
-        applyVisibility();
-        requestAnimationFrame(() => loadMoreButton.scrollIntoView({ block: "center", behavior: "smooth" }));
+        scanAndApply();
+        requestAnimationFrame(() => {
+          if (loadMoreButton && !loadMoreButton.hidden) loadMoreButton.scrollIntoView({ block: "center", behavior: "smooth" });
+        });
       };
       showLoadMore(container, firstVisible);
       return;
@@ -318,8 +523,9 @@
   }
 
   function showLoadMore(container, beforeNode) {
+    if (!loadMoreButton) return;
     if (!container) {
-      const fallback = document.querySelector("main") || document.body || document.documentElement;
+      const fallback = getMessageScope() || document.body || document.documentElement;
       if (fallback && loadMoreButton.parentElement !== fallback) fallback.prepend(loadMoreButton);
       loadMoreButton.hidden = false;
       return;
@@ -342,10 +548,61 @@
     }
 
     const visible = total - hiddenCount;
-    const trimText = apiTrimmedCurrentConversation ? " · API trim" : "";
+    const stats = readApiStats();
+    const apiText = stats && stats.totalRenderableMessages
+      ? ` · API ${stats.keptRenderableMessages}/${stats.totalRenderableMessages}`
+      : apiTrimmedCurrentConversation
+        ? " · API trim"
+        : "";
     const kept = document.documentElement ? document.documentElement.getAttribute(KEPT_ATTR) : null;
-    statusBadge.textContent = `표시 ${visible}/${total} · 숨김 ${hiddenCount}${kept ? ` · API ${kept}` : trimText}`;
+    statusBadge.textContent = `표시 ${visible}/${total} · 숨김 ${hiddenCount}${apiText || (kept ? ` · API ${kept}` : "")}`;
     statusBadge.hidden = false;
+  }
+
+  function getMemorySnapshot() {
+    const memory = typeof performance !== "undefined" && performance ? performance.memory : null;
+    if (!memory) return null;
+    return {
+      usedJSHeapSize: numberOrNull(memory.usedJSHeapSize),
+      totalJSHeapSize: numberOrNull(memory.totalJSHeapSize),
+      jsHeapSizeLimit: numberOrNull(memory.jsHeapSizeLimit)
+    };
+  }
+
+  function numberOrNull(value) {
+    const n = Number(value);
+    return Number.isFinite(n) ? n : null;
+  }
+
+  function collectMetricsForPopup() {
+    const turns = queryMessageTurns();
+    const total = turns.length;
+    const hidden = turns.filter((el) => el.classList.contains(HIDDEN_CLASS)).length;
+    const visible = Math.max(0, total - hidden);
+    lastDomMetrics = { total, hidden, visible };
+    return {
+      ok: true,
+      url: location.href,
+      routeActive: isLikelyChatSurface(),
+      enabled: settings.enabled,
+      apiTrimmedCurrentConversation,
+      settings: { ...settings },
+      dom: { ...lastDomMetrics, nodes: countDomNodes() },
+      api: readApiStats(),
+      memory: getMemorySnapshot(),
+      css: {
+        contentVisibilitySupported: Boolean(window.CSS && CSS.supports && CSS.supports("content-visibility", "auto"))
+      },
+      timestamp: Date.now()
+    };
+  }
+
+  function countDomNodes() {
+    try {
+      return document.getElementsByTagName("*").length;
+    } catch {
+      return null;
+    }
   }
 
   function debug(...args) {
@@ -357,8 +614,15 @@
     }
   }
 
-  window.addEventListener("beforeunload", () => {
-    if (observer) observer.disconnect();
-    observer = null;
-  });
+  window.addEventListener("pagehide", cleanup, { once: true });
+  window.addEventListener("beforeunload", cleanup, { once: true });
+
+  function cleanup() {
+    stopObserver();
+    if (navigationTimer) clearInterval(navigationTimer);
+    if (scanTimer) clearTimeout(scanTimer);
+    navigationTimer = 0;
+    scanTimer = 0;
+    lastDomMetrics = { total: 0, hidden: 0, visible: 0 };
+  }
 })();
