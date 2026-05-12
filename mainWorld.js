@@ -1,8 +1,8 @@
 (() => {
   "use strict";
 
-  const MAIN_WORLD_VERSION = "0.8.0";
-  const FETCH_PATCH_FLAG = "__CGPT_LONG_CHAT_LOADER_FETCH_PATCHED_V080__";
+  const MAIN_WORLD_VERSION = "0.9.0";
+  const FETCH_PATCH_FLAG = "__CGPT_LONG_CHAT_LOADER_FETCH_PATCHED_V090__";
   const HISTORY_PATCH_FLAG = "__CGPT_LONG_CHAT_LOADER_HISTORY_PATCHED__";
   const SETTINGS_KEY = "cgptLongChatLoader.settings";
   const SETTINGS_ATTR = "data-cgpt-lb-settings";
@@ -19,6 +19,8 @@
   const ACTIVE_STATE_EVENT = "cgpt-lb-active-state";
   const CACHE_SUSPENDED_UNTIL_ATTR = "data-cgpt-lb-cache-suspended-until";
   const CACHE_SUSPENDED_REASON_ATTR = "data-cgpt-lb-cache-suspended-reason";
+  const LIVE_TRIM_BYPASS_UNTIL_ATTR = "data-cgpt-lb-live-trim-bypass-until";
+  const LIVE_TRIM_BYPASS_REASON_ATTR = "data-cgpt-lb-live-trim-bypass-reason";
   const DEBUG_PREFIX = "[ChatGPT Long Chat Loader]";
   const RESPONSE_CACHE_HARD_MAX = 2;
   const RESPONSE_CACHE_TTL_MS = 60_000;
@@ -26,6 +28,8 @@
   const CACHE_MEMORY_PRESSURE_RATIO = 0.75;
   const CACHE_SUSPEND_AFTER_MUTATION_MS = 5 * 60 * 1000;
   const CACHE_SUSPEND_AFTER_ACTIVE_MS = 3 * 60 * 1000;
+  const LIVE_TRIM_BYPASS_AFTER_MUTATION_MS = 5 * 60 * 1000;
+  const LIVE_TRIM_BYPASS_AFTER_ACTIVE_MS = 3 * 60 * 1000;
 
   const DEFAULT_SETTINGS = Object.freeze({
     enabled: true,
@@ -46,6 +50,8 @@
   let settingsFromBridge = null;
   let cacheSuspendedUntil = 0;
   let cacheSuspendedReason = "";
+  let liveTrimBypassUntil = 0;
+  let liveTrimBypassReason = "";
 
   markMainWorldVersion();
   installLocationChangePatch();
@@ -70,8 +76,11 @@
     responseCache.clear();
     cacheSuspendedUntil = 0;
     cacheSuspendedReason = "";
+    liveTrimBypassUntil = 0;
+    liveTrimBypassReason = "";
     clearTrimSignal();
     updateCacheSuspensionAttributes();
+    updateLiveTrimBypassAttributes();
   }, { passive: true });
   window.addEventListener("pagehide", () => responseCache.clear(), { once: true });
 
@@ -85,7 +94,8 @@
     if (isConversationMutation(requestUrl, requestMethod)) {
       const settings = readSettings();
       suspendResponseCache("conversation mutation", CACHE_SUSPEND_AFTER_MUTATION_MS, settings);
-      debug(settings, "cache suspended after conversation mutation", requestMethod, requestUrl);
+      beginLiveTrimBypass("conversation mutation", LIVE_TRIM_BYPASS_AFTER_MUTATION_MS, settings);
+      debug(settings, "cache and live trim bypass after conversation mutation", requestMethod, requestUrl);
       return originalFetch.call(this, input, init);
     }
 
@@ -104,6 +114,13 @@
       responseCache.clear();
       clearTrimSignal();
       debug(settings, "bypass once: full conversation load", requestUrl);
+      return originalFetch.call(this, input, init);
+    }
+
+    if (isLiveTrimBypassActive()) {
+      responseCache.clear();
+      signalLiveTrimBypass("live reply protection", requestUrl);
+      debug(settings, "live trim bypass: returning original conversation response", requestUrl, liveTrimBypassReason);
       return originalFetch.call(this, input, init);
     }
 
@@ -184,7 +201,12 @@
 
       if (stats.activeGeneration || stats.effectiveCurrentNodeChanged) {
         suspendResponseCache("active generation", CACHE_SUSPEND_AFTER_ACTIVE_MS, settings);
+        beginLiveTrimBypass("active generation", LIVE_TRIM_BYPASS_AFTER_ACTIVE_MS, settings);
         stats.cacheSuspended = true;
+        stats.liveTrimBypass = true;
+        signalLiveTrimBypass("active generation", requestUrl);
+        debug(settings, "active generation detected; returning original conversation response", requestUrl);
+        return buildResponse(meta, text, jsonLike);
       }
 
       stats.cacheEligible = shouldStoreCache(settings, body, stats);
@@ -423,10 +445,12 @@
     const detail = parseJsonDetail(event && event.detail);
     if (!detail || !detail.active) {
       refreshCacheSuspensionState();
+      retireLiveTrimBypass("active reply idle", 30_000);
       return;
     }
     const ttl = clampInt(detail.ttlMs, 30_000, CACHE_SUSPEND_AFTER_MUTATION_MS, CACHE_SUSPEND_AFTER_ACTIVE_MS);
     suspendResponseCache(detail.reason || "active reply", ttl, settings);
+    beginLiveTrimBypass(detail.reason || "active reply", ttl, settings);
     debug(settings, "cache suspended after active-state signal", detail.reason || "active reply");
   }
 
@@ -500,6 +524,75 @@
     } else {
       root.removeAttribute(CACHE_SUSPENDED_UNTIL_ATTR);
       root.removeAttribute(CACHE_SUSPENDED_REASON_ATTR);
+    }
+  }
+
+  function beginLiveTrimBypass(reason, ttlMs, settings) {
+    const ttl = Math.max(30_000, Number(ttlMs) || LIVE_TRIM_BYPASS_AFTER_ACTIVE_MS);
+    liveTrimBypassUntil = Math.max(liveTrimBypassUntil || 0, Date.now() + ttl);
+    liveTrimBypassReason = String(reason || "active reply");
+    if (responseCache.size) responseCache.clear();
+    updateLiveTrimBypassAttributes();
+    if (settings) debug(settings, "live trim bypass enabled", liveTrimBypassReason, `${Math.round(ttl / 1000)}s`);
+  }
+
+  function clearLiveTrimBypass(reason) {
+    if (!liveTrimBypassUntil && !liveTrimBypassReason) return;
+    liveTrimBypassUntil = 0;
+    liveTrimBypassReason = "";
+    updateLiveTrimBypassAttributes();
+    debug(readSettings(), "live trim bypass cleared", reason || "idle");
+  }
+
+  function retireLiveTrimBypass(reason, graceMs) {
+    if (!liveTrimBypassUntil || Date.now() >= liveTrimBypassUntil) {
+      clearLiveTrimBypass(reason);
+      return;
+    }
+    const nextUntil = Date.now() + Math.max(5_000, Number(graceMs) || 30_000);
+    if (liveTrimBypassUntil > nextUntil) {
+      liveTrimBypassUntil = nextUntil;
+      liveTrimBypassReason = String(reason || "active reply idle");
+      updateLiveTrimBypassAttributes();
+      debug(readSettings(), "live trim bypass retiring", liveTrimBypassReason, `${Math.round((liveTrimBypassUntil - Date.now()) / 1000)}s`);
+    }
+  }
+
+  function isLiveTrimBypassActive() {
+    refreshLiveTrimBypassState();
+    return Date.now() < liveTrimBypassUntil;
+  }
+
+  function refreshLiveTrimBypassState() {
+    if (liveTrimBypassUntil && Date.now() >= liveTrimBypassUntil) {
+      liveTrimBypassUntil = 0;
+      liveTrimBypassReason = "";
+      updateLiveTrimBypassAttributes();
+    }
+  }
+
+  function signalLiveTrimBypass(reason, requestUrl) {
+    updateLiveTrimBypassAttributes();
+    try {
+      const root = document.documentElement;
+      if (!root) return;
+      root.setAttribute(LIVE_TRIM_BYPASS_REASON_ATTR, String(reason || liveTrimBypassReason || "active reply"));
+      if (requestUrl) root.setAttribute("data-cgpt-lb-live-trim-bypass-url", String(requestUrl));
+    } catch {
+      // Non-critical bridge failure.
+    }
+  }
+
+  function updateLiveTrimBypassAttributes() {
+    const root = document.documentElement;
+    if (!root) return;
+    if (liveTrimBypassUntil && Date.now() < liveTrimBypassUntil) {
+      root.setAttribute(LIVE_TRIM_BYPASS_UNTIL_ATTR, String(liveTrimBypassUntil));
+      root.setAttribute(LIVE_TRIM_BYPASS_REASON_ATTR, liveTrimBypassReason || "active reply");
+    } else {
+      root.removeAttribute(LIVE_TRIM_BYPASS_UNTIL_ATTR);
+      root.removeAttribute(LIVE_TRIM_BYPASS_REASON_ATTR);
+      root.removeAttribute("data-cgpt-lb-live-trim-bypass-url");
     }
   }
 

@@ -13,9 +13,9 @@
     maintenanceIntervalSec: 30,
     cssContainmentEnabled: true,
     showStatus: false,
-    debug: false,
-    githubRepo: "ch040602/Chatgpt-web-booster_chrome_extentsion"
+    debug: false
   });
+  const GITHUB_REPO = "ch040602/Chatgpt-web-booster_chrome_extentsion";
 
   const ids = Object.keys(DEFAULT_SETTINGS);
   const NUMBER_SETTING_IDS = new Set([
@@ -26,7 +26,7 @@
     "apiCacheMaxKb",
     "maintenanceIntervalSec"
   ]);
-  const TEXT_SETTING_IDS = new Set(["githubRepo"]);
+  const TEXT_SETTING_IDS = new Set([]);
   const saved = document.getElementById("saved");
   const metricMain = document.getElementById("metricMain");
   const metricSub = document.getElementById("metricSub");
@@ -76,7 +76,7 @@
     if (openExtensionsPage) openExtensionsPage.addEventListener("click", openChromeExtensionsPage);
     if (reloadExtension) reloadExtension.addEventListener("click", () => chrome.runtime.reload());
 
-    renderUpdateIdle(settings.githubRepo);
+    renderUpdateIdle();
     requestMetricsOnce();
   }
 
@@ -163,8 +163,7 @@
       maintenanceIntervalSec: clampInt(merged.maintenanceIntervalSec, 10, 300, DEFAULT_SETTINGS.maintenanceIntervalSec),
       cssContainmentEnabled: Boolean(merged.cssContainmentEnabled ?? merged.contentVisibilityEnabled),
       showStatus: Boolean(merged.showStatus),
-      debug: Boolean(merged.debug),
-      githubRepo: normalizeGitHubRepo(merged.githubRepo, DEFAULT_SETTINGS.githubRepo)
+      debug: Boolean(merged.debug)
     };
   }
 
@@ -309,6 +308,7 @@
     appendMetricLine("DOM 메시지", formatDom(metrics.dom));
     appendMetricLine("더보기 버튼", formatLoadMore(metrics.loadMore));
     appendMetricLine("응답 진행 보호", formatLiveReply(metrics.liveReply));
+    appendMetricLine("Live API rewrite", formatLiveTrimBypass(metrics.liveTrimBypass));
     appendMetricLine("Trim 상태", formatTrimState(metrics.trimState));
     appendMetricLine("응답 micro-cache", formatCache(metrics));
     appendMetricLine("API patch", formatApiPatch(metrics));
@@ -432,7 +432,13 @@
     if (!liveReply || !liveReply.active) return "대기";
     const age = positiveNumber(liveReply.ageSec) ? ` · ${formatNumber(liveReply.ageSec)}초 전` : "";
     const count = positiveNumber(liveReply.protectedCount) ? ` · 최근 ${formatNumber(liveReply.protectedCount)}개 보호` : "";
-    return `활성 · ${liveReply.reason || "reply"}${age}${count}`;
+    const recovery = liveReply.streamRecovery ? ` · 복구 대기 ${formatNumber(liveReply.streamRecoveryAgeSec || 0)}초` : "";
+    return `활성 · ${liveReply.reason || "reply"}${age}${count}${recovery}`;
+  }
+
+  function formatLiveTrimBypass(state) {
+    if (!state || !state.active) return "대기";
+    return `원본 통과 · ${formatNumber(state.remainingSec)}초 · ${state.reason || "active reply"}`;
   }
 
   function formatTrimState(trimState) {
@@ -508,18 +514,15 @@
   }
 
 
-  function renderUpdateIdle(repo) {
+  function renderUpdateIdle() {
     latestUpdateInfo = null;
-    setUpdateStatus("수동 확인 전", `repo: ${repo || DEFAULT_SETTINGS.githubRepo}`);
+    setUpdateStatus("수동 확인 전", "업데이트 확인 버튼을 누르면 고정된 저장소를 확인합니다.");
     clearUpdateLines();
     setDownloadButtonEnabled(false);
   }
 
   async function checkGitHubUpdate() {
-    const repo = normalizeGitHubRepo(getSettingValue("githubRepo"), DEFAULT_SETTINGS.githubRepo);
-    const repoInput = document.getElementById("githubRepo");
-    if (repoInput) repoInput.value = repo;
-    await storageSet({ githubRepo: repo });
+    const repo = GITHUB_REPO;
 
     setDownloadButtonEnabled(false);
     setUpdateStatus("확인 중", "GitHub release와 main branch manifest를 확인합니다.");
@@ -727,7 +730,7 @@
   }
 
   function openLatestReleasePage() {
-    const repo = normalizeGitHubRepo(getSettingValue("githubRepo"), DEFAULT_SETTINGS.githubRepo);
+    const repo = GITHUB_REPO;
     const url = latestUpdateInfo && latestUpdateInfo.best && latestUpdateInfo.best.htmlUrl
       ? latestUpdateInfo.best.htmlUrl
       : `https://github.com/${repo}/releases/latest`;

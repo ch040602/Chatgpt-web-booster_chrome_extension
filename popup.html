@@ -158,10 +158,6 @@
       <h2>GitHub 업데이트</h2>
       <button id="checkGitUpdate" type="button">업데이트 확인</button>
     </div>
-    <label>
-      <span>GitHub repo</span>
-      <input id="githubRepo" type="text" spellcheck="false" autocomplete="off">
-    </label>
     <div class="button-grid">
       <button id="downloadGitUpdate" type="button" disabled>최신 ZIP 다운로드</button>
       <button id="openGitRelease" type="button">릴리스 열기</button>
@@ -250,7 +246,7 @@
   </div>
 
   <div class="hint">
-    응답 micro-cache는 기본 1개이며, 답변 생성 중에는 stale 응답 방지를 위해 일시중지됩니다. 예상 속도 향상 계산은 팝업을 열 때만 실행됩니다.
+    응답 micro-cache는 기본 1개입니다. 답변 생성·스트림 복구 중에는 stale 응답과 rewrite를 모두 피하기 위해 원본 conversation 응답을 통과시킵니다. 예상 속도 향상 계산은 팝업을 열 때만 실행됩니다.
   </div>
   <div id="saved"></div>
 

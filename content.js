@@ -1,8 +1,8 @@
 (() => {
   "use strict";
 
-  const CONTENT_VERSION = "0.8.0";
-  const CONTENT_BOOT_FLAG = "__CGPT_LONG_CHAT_LOADER_CONTENT_ACTIVE_V080__";
+  const CONTENT_VERSION = "0.9.0";
+  const CONTENT_BOOT_FLAG = "__CGPT_LONG_CHAT_LOADER_CONTENT_ACTIVE_V090__";
   if (window[CONTENT_BOOT_FLAG]) {
     try {
       window.dispatchEvent(new CustomEvent("cgpt-lb-force-scan", { detail: CONTENT_VERSION }));
@@ -27,11 +27,13 @@
   const ACTIVE_STATE_EVENT = "cgpt-lb-active-state";
   const CACHE_SUSPENDED_UNTIL_ATTR = "data-cgpt-lb-cache-suspended-until";
   const CACHE_SUSPENDED_REASON_ATTR = "data-cgpt-lb-cache-suspended-reason";
+  const LIVE_TRIM_BYPASS_UNTIL_ATTR = "data-cgpt-lb-live-trim-bypass-until";
+  const LIVE_TRIM_BYPASS_REASON_ATTR = "data-cgpt-lb-live-trim-bypass-reason";
   const ACTIVE_REPLY_ATTR = "data-cgpt-lb-active-reply";
   const HIDDEN_CLASS = "cgpt-lb-hidden";
   const CONTAINED_CLASS = "cgpt-lb-contained";
   const LIVE_PROTECTED_CLASS = "cgpt-lb-live-protected";
-  const LOAD_MORE_ID = "cgpt-lb-load-more-v080";
+  const LOAD_MORE_ID = "cgpt-lb-load-more-v090";
   const LEGACY_LOAD_MORE_ID = "cgpt-lb-load-more";
   const STATUS_ID = "cgpt-lb-status";
   const TRIM_MARKER_KEY = "cgptLongChatLoader.trimMarkers.v1";
@@ -42,6 +44,8 @@
   const MAX_DEBUG_ARG_LENGTH = 2000;
   const ACTIVE_REPLY_PROTECTION_MS = 4 * 60 * 1000;
   const ACTIVE_REPLY_IDLE_GRACE_MS = 20 * 1000;
+  const ACTIVE_REPLY_WATCHDOG_INTERVAL_MS = 3000;
+  const ACTIVE_REPLY_MAX_SILENT_MS = 45 * 1000;
   const TURN_SELECTOR = [
     '[data-testid^="conversation-turn-"]',
     '[data-testid*="conversation-turn"]',
@@ -100,6 +104,8 @@
   let liveReplyState = { active: false, reason: "init", lastSeenAt: 0, protectedCount: 0 };
   let lastActiveSignalAt = 0;
   let lastActiveSignalValue = false;
+  let activeReplyWatchdogTimer = 0;
+  let streamRecoverySince = 0;
   let debugLogWriteQueue = Promise.resolve();
 
   boot();
@@ -851,13 +857,15 @@
     }
 
     if (isActiveReplyProtected()) {
+      if (liveReplyState.lastSeenAt && Date.now() - liveReplyState.lastSeenAt > ACTIVE_REPLY_MAX_SILENT_MS && !findStopControl(getMessageScope())) {
+        clearActiveReplyProtection("silent-expired");
+        return { ...liveReplyState };
+      }
       return { ...liveReplyState, active: true };
     }
 
     if (liveReplyState.active) {
-      liveReplyState = { active: false, reason: "idle", lastSeenAt: now, protectedCount: 0 };
-      setActiveReplyAttribute(false);
-      dispatchActiveStateToMain(false, "idle", 0);
+      clearActiveReplyProtection("idle");
     }
     return { ...liveReplyState };
   }
@@ -875,7 +883,41 @@
       return { active: true, reason: "latest-assistant-streaming", protectedCount: 6 };
     }
 
+    const recoveryNotice = findStreamRecoveryNotice(turns, scope);
+    if (recoveryNotice) {
+      if (!streamRecoverySince) streamRecoverySince = Date.now();
+      return { active: true, reason: "stream-recovery-waiting", protectedCount: 8 };
+    }
+
+    streamRecoverySince = 0;
+
     return { active: false, reason: "none", protectedCount: 0 };
+  }
+
+  function findStreamRecoveryNotice(turns, scope) {
+    const recentTurns = Array.isArray(turns) ? turns.slice(-8) : [];
+    for (const turn of recentTurns) {
+      if (!isLikelyAssistantTurn(turn)) continue;
+      if (matchesStreamRecoveryText(turn && turn.textContent)) return turn;
+    }
+
+    const statusCandidates = safeQueryAll('[role="status"], [role="alert"], [aria-live], [data-testid*="stream"], [data-testid*="status"], [data-testid*="toast"]', scope);
+    for (const el of statusCandidates) {
+      if (isExtensionUi(el)) continue;
+      const enclosingTurn = el.closest && el.closest(TURN_CLOSEST_SELECTOR);
+      if (enclosingTurn && isLikelyUserTurn(enclosingTurn)) continue;
+      if (matchesStreamRecoveryText(el.textContent)) return el;
+    }
+    return null;
+  }
+
+  function matchesStreamRecoveryText(value) {
+    const text = String(value || "").replace(/\s+/g, " ").trim().toLowerCase();
+    if (!text) return false;
+    if (text.includes("스트리밍이 중지") && (text.includes("메시지 완료") || text.includes("완료를 기다"))) return true;
+    if (text.includes("streaming") && (text.includes("stopped") || text.includes("interrupted")) && (text.includes("waiting") || text.includes("complete") || text.includes("completion"))) return true;
+    if (text.includes("stream") && text.includes("message") && text.includes("completion")) return true;
+    return false;
   }
 
   function findStopControl(scope) {
@@ -897,11 +939,26 @@
 
   function isLikelyAssistantTurn(el) {
     if (!(el instanceof HTMLElement)) return false;
-    const roleEl = el.matches(ROLE_SELECTOR) ? el : el.querySelector(ROLE_SELECTOR);
-    const role = roleEl && String(roleEl.getAttribute("data-message-author-role") || roleEl.getAttribute("data-message-author") || roleEl.getAttribute("data-author-role") || "").toLowerCase();
+    const role = getTurnRole(el);
     if (role.includes("assistant")) return true;
     const testId = String(el.getAttribute("data-testid") || "").toLowerCase();
     return testId.includes("assistant");
+  }
+
+  function isLikelyUserTurn(el) {
+    if (!(el instanceof HTMLElement)) return false;
+    const role = getTurnRole(el);
+    if (role.includes("user")) return true;
+    const testId = String(el.getAttribute("data-testid") || "").toLowerCase();
+    return testId.includes("user");
+  }
+
+  function getTurnRole(el) {
+    if (!(el instanceof HTMLElement)) return "";
+    const roleEl = el.matches(ROLE_SELECTOR) ? el : el.querySelector(ROLE_SELECTOR);
+    return roleEl
+      ? String(roleEl.getAttribute("data-message-author-role") || roleEl.getAttribute("data-message-author") || roleEl.getAttribute("data-author-role") || "").toLowerCase()
+      : "";
   }
 
   function markActiveReply(reason, ttlMs, protectedCount) {
@@ -916,6 +973,38 @@
     };
     setActiveReplyAttribute(true);
     dispatchActiveStateToMain(true, liveReplyState.reason, Math.max(30_000, Number(ttlMs) || ACTIVE_REPLY_PROTECTION_MS));
+    startActiveReplyWatchdog();
+  }
+
+  function clearActiveReplyProtection(reason) {
+    liveReplyState = { active: false, reason: String(reason || "idle"), lastSeenAt: Date.now(), protectedCount: 0, protectUntil: 0 };
+    streamRecoverySince = 0;
+    setActiveReplyAttribute(false);
+    dispatchActiveStateToMain(false, reason || "idle", 0);
+    stopActiveReplyWatchdog();
+  }
+
+  function startActiveReplyWatchdog() {
+    if (activeReplyWatchdogTimer) return;
+    activeReplyWatchdogTimer = window.setInterval(() => {
+      if (!liveReplyState.active) {
+        stopActiveReplyWatchdog();
+        return;
+      }
+      if (!isLikelyChatSurface() || document.hidden) return;
+      const hardExpired = Number(liveReplyState.protectUntil || 0) <= Date.now();
+      if (hardExpired) {
+        scheduleScan(true);
+        return;
+      }
+      dispatchActiveStateToMain(true, liveReplyState.reason || "active reply", ACTIVE_REPLY_IDLE_GRACE_MS + 10_000);
+      scheduleScan();
+    }, ACTIVE_REPLY_WATCHDOG_INTERVAL_MS);
+  }
+
+  function stopActiveReplyWatchdog() {
+    if (activeReplyWatchdogTimer) clearInterval(activeReplyWatchdogTimer);
+    activeReplyWatchdogTimer = 0;
   }
 
   function isActiveReplyProtected() {
@@ -1260,6 +1349,7 @@
         maxKb: settings.apiCacheMaxKb,
         ...readCacheSuspensionState()
       },
+      liveTrimBypass: readLiveTrimBypassState(),
       loadMore: {
         ...lastLoadMoreState,
         inDom: Boolean(loadMoreButton && document.documentElement && document.documentElement.contains(loadMoreButton)),
@@ -1274,7 +1364,9 @@
       active: isActiveReplyProtected(),
       reason: liveReplyState.reason || "none",
       ageSec: liveReplyState.lastSeenAt ? Math.max(0, Math.round((Date.now() - liveReplyState.lastSeenAt) / 1000)) : null,
-      protectedCount: liveReplyState.protectedCount || 0
+      protectedCount: liveReplyState.protectedCount || 0,
+      streamRecovery: Boolean(streamRecoverySince),
+      streamRecoveryAgeSec: streamRecoverySince ? Math.max(0, Math.round((Date.now() - streamRecoverySince) / 1000)) : null
     };
   }
 
@@ -1287,6 +1379,18 @@
       suspended: active,
       suspendedReason: active ? String(reason || "active reply") : "",
       suspendedForSec: active ? Math.max(0, Math.ceil((until - Date.now()) / 1000)) : 0
+    };
+  }
+
+  function readLiveTrimBypassState() {
+    const root = document.documentElement;
+    const until = Number(root && root.getAttribute(LIVE_TRIM_BYPASS_UNTIL_ATTR));
+    const reason = root ? root.getAttribute(LIVE_TRIM_BYPASS_REASON_ATTR) : "";
+    const active = Number.isFinite(until) && until > Date.now();
+    return {
+      active,
+      reason: active ? String(reason || "active reply") : "",
+      remainingSec: active ? Math.max(0, Math.ceil((until - Date.now()) / 1000)) : 0
     };
   }
 
@@ -1373,9 +1477,11 @@
     stopObserver();
     if (navigationTimer) clearInterval(navigationTimer);
     if (maintenanceTimer) clearInterval(maintenanceTimer);
+    if (activeReplyWatchdogTimer) clearInterval(activeReplyWatchdogTimer);
     if (scanTimer) clearTimeout(scanTimer);
     navigationTimer = 0;
     maintenanceTimer = 0;
+    activeReplyWatchdogTimer = 0;
     maintenanceScheduled = false;
     scanTimer = 0;
     lastDomMetrics = { total: 0, hidden: 0, visible: 0 };
