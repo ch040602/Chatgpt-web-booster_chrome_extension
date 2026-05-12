@@ -30,9 +30,14 @@
       margin: 10px 0;
     }
     label span { flex: 1; }
-    input[type="number"] {
+    input[type="number"],
+    input[type="text"] {
       width: 72px;
       padding: 4px 6px;
+    }
+    input[type="text"] {
+      width: 190px;
+      font-size: 12px;
     }
     input[type="checkbox"] {
       width: 16px;
@@ -102,6 +107,40 @@
       min-height: 16px;
       margin-top: 8px;
     }
+
+    .update-box {
+      border: 1px solid color-mix(in srgb, CanvasText 14%, Canvas 86%);
+      border-radius: 10px;
+      padding: 10px;
+      margin-top: 10px;
+      background: color-mix(in srgb, Canvas 96%, CanvasText 4%);
+    }
+    .button-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+      margin-top: 8px;
+    }
+    button:disabled {
+      opacity: 0.55;
+      cursor: not-allowed;
+    }
+    .status-block {
+      margin-top: 8px;
+      color: color-mix(in srgb, CanvasText 76%, Canvas 24%);
+      font-size: 12px;
+    }
+    .status-line {
+      display: flex;
+      justify-content: space-between;
+      gap: 10px;
+      margin-top: 4px;
+    }
+    .status-line strong {
+      text-align: right;
+      overflow-wrap: anywhere;
+    }
+
   </style>
 </head>
 <body>
@@ -111,6 +150,27 @@
     <button id="openReadme" type="button">English README</button>
     <button id="openReadmeKo" type="button">한국어 README</button>
   </div>
+
+
+
+  <section class="update-box" aria-live="polite">
+    <div class="metric-top">
+      <h2>GitHub 업데이트</h2>
+      <button id="checkGitUpdate" type="button">업데이트 확인</button>
+    </div>
+    <label>
+      <span>GitHub repo</span>
+      <input id="githubRepo" type="text" spellcheck="false" autocomplete="off">
+    </label>
+    <div class="button-grid">
+      <button id="downloadGitUpdate" type="button" disabled>최신 ZIP 다운로드</button>
+      <button id="openGitRelease" type="button">릴리스 열기</button>
+      <button id="openExtensionsPage" type="button">확장 관리 열기</button>
+      <button id="reloadExtension" type="button">확장 재로드</button>
+    </div>
+    <div id="gitUpdateStatus" class="status-block">수동 확인 전입니다.</div>
+    <div id="gitUpdateLines" class="status-block"></div>
+  </section>
 
   <section id="metrics" class="metrics" aria-live="polite">
     <div class="metric-top">
@@ -184,8 +244,13 @@
     <input id="debug" type="checkbox">
   </label>
 
+  <div class="doc-row">
+    <button id="exportDebugLog" type="button">디버그 로그 파일 저장</button>
+    <button id="clearDebugLog" type="button">로그 비우기</button>
+  </div>
+
   <div class="hint">
-    응답 micro-cache는 기본 1개이며 항목당 크기·TTL·메모리 압박 조건으로 제한됩니다. 예상 속도 향상 계산은 팝업을 열 때만 실행됩니다.
+    응답 micro-cache는 기본 1개이며, 답변 생성 중에는 stale 응답 방지를 위해 일시중지됩니다. 예상 속도 향상 계산은 팝업을 열 때만 실행됩니다.
   </div>
   <div id="saved"></div>
 

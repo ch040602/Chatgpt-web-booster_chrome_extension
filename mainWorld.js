@@ -1,8 +1,8 @@
 (() => {
   "use strict";
 
-  const MAIN_WORLD_VERSION = "0.6.0";
-  const FETCH_PATCH_FLAG = "__CGPT_LONG_CHAT_LOADER_FETCH_PATCHED_V060__";
+  const MAIN_WORLD_VERSION = "0.8.0";
+  const FETCH_PATCH_FLAG = "__CGPT_LONG_CHAT_LOADER_FETCH_PATCHED_V080__";
   const HISTORY_PATCH_FLAG = "__CGPT_LONG_CHAT_LOADER_HISTORY_PATCHED__";
   const SETTINGS_KEY = "cgptLongChatLoader.settings";
   const SETTINGS_ATTR = "data-cgpt-lb-settings";
@@ -13,13 +13,19 @@
   const BYPASS_KEY = "cgptLongChatLoader.bypassOnce";
   const SETTINGS_EVENT = "cgpt-lb-settings";
   const STATS_EVENT = "cgpt-lb-trim-stats";
+  const DEBUG_EVENT = "cgpt-lb-debug-log";
   const LOCATION_EVENT = "cgpt-lb-locationchange";
   const MAINTENANCE_EVENT = "cgpt-lb-maintenance";
+  const ACTIVE_STATE_EVENT = "cgpt-lb-active-state";
+  const CACHE_SUSPENDED_UNTIL_ATTR = "data-cgpt-lb-cache-suspended-until";
+  const CACHE_SUSPENDED_REASON_ATTR = "data-cgpt-lb-cache-suspended-reason";
   const DEBUG_PREFIX = "[ChatGPT Long Chat Loader]";
   const RESPONSE_CACHE_HARD_MAX = 2;
   const RESPONSE_CACHE_TTL_MS = 60_000;
   const STATS_TTL_MS = 180_000;
   const CACHE_MEMORY_PRESSURE_RATIO = 0.75;
+  const CACHE_SUSPEND_AFTER_MUTATION_MS = 5 * 60 * 1000;
+  const CACHE_SUSPEND_AFTER_ACTIVE_MS = 3 * 60 * 1000;
 
   const DEFAULT_SETTINGS = Object.freeze({
     enabled: true,
@@ -38,6 +44,8 @@
 
   const responseCache = new Map();
   let settingsFromBridge = null;
+  let cacheSuspendedUntil = 0;
+  let cacheSuspendedReason = "";
 
   markMainWorldVersion();
   installLocationChangePatch();
@@ -57,9 +65,13 @@
   });
 
   window.addEventListener(MAINTENANCE_EVENT, handleMaintenanceEvent);
+  window.addEventListener(ACTIVE_STATE_EVENT, handleActiveStateEvent);
   window.addEventListener(LOCATION_EVENT, () => {
     responseCache.clear();
+    cacheSuspendedUntil = 0;
+    cacheSuspendedReason = "";
     clearTrimSignal();
+    updateCacheSuspensionAttributes();
   }, { passive: true });
   window.addEventListener("pagehide", () => responseCache.clear(), { once: true });
 
@@ -70,11 +82,19 @@
     const requestUrl = getRequestUrl(input);
     const requestMethod = getRequestMethod(input, init);
 
+    if (isConversationMutation(requestUrl, requestMethod)) {
+      const settings = readSettings();
+      suspendResponseCache("conversation mutation", CACHE_SUSPEND_AFTER_MUTATION_MS, settings);
+      debug(settings, "cache suspended after conversation mutation", requestMethod, requestUrl);
+      return originalFetch.call(this, input, init);
+    }
+
     if (!isConversationGet(requestUrl, requestMethod)) {
       return originalFetch.call(this, input, init);
     }
 
     const settings = readSettings();
+    refreshCacheSuspensionState();
     if (!settings.enabled || !settings.apiTrimEnabled) {
       clearTrimSignal();
       return originalFetch.call(this, input, init);
@@ -89,7 +109,8 @@
 
     const keepRenderableMessages = calculateKeepRenderableMessages(settings);
     const cacheKey = `${requestUrl}::keep=${keepRenderableMessages}`;
-    const cached = getCached(settings, cacheKey);
+    const cacheSuspended = isResponseCacheSuspended();
+    const cached = cacheSuspended ? null : getCached(settings, cacheKey);
     if (cached) {
       const stats = {
         ...cached.stats,
@@ -154,8 +175,17 @@
         cacheMaxKb: settings.apiCacheMaxKb,
         timestamp: Date.now(),
         pageUrl: location.href,
-        requestUrl
+        requestUrl,
+        activeGeneration: Boolean(trimResult.activeGeneration),
+        protectedNodeCount: trimResult.protectedNodeCount || 0,
+        effectiveCurrentNodeChanged: Boolean(trimResult.effectiveCurrentNodeChanged),
+        cacheSuspended: Boolean(cacheSuspended || isResponseCacheSuspended())
       };
+
+      if (stats.activeGeneration || stats.effectiveCurrentNodeChanged) {
+        suspendResponseCache("active generation", CACHE_SUSPEND_AFTER_ACTIVE_MS, settings);
+        stats.cacheSuspended = true;
+      }
 
       stats.cacheEligible = shouldStoreCache(settings, body, stats);
       signalStats(stats);
@@ -259,6 +289,23 @@
     return /^\/backend-api\/(?:f\/)?conversation\/[^/]+/.test(path);
   }
 
+
+  function isConversationMutation(url, method) {
+    if (!url || method === "GET" || method === "HEAD" || method === "OPTIONS") return false;
+    if (!isSupportedHost(location.hostname)) return false;
+
+    let parsed;
+    try {
+      parsed = new URL(url, location.href);
+    } catch {
+      return false;
+    }
+
+    if (!isSupportedHost(parsed.hostname)) return false;
+    const path = parsed.pathname || "";
+    return /^\/backend-api\/(?:f\/)?conversation(?:\/.*)?$/.test(path);
+  }
+
   function isSupportedHost(hostname) {
     return hostname === "chatgpt.com" || hostname.endsWith(".chatgpt.com") || hostname === "chat.openai.com";
   }
@@ -359,17 +406,34 @@
     }
   }
 
+  function parseJsonDetail(detail) {
+    if (!detail) return null;
+    if (typeof detail === "object") return detail;
+    if (typeof detail !== "string") return null;
+    try {
+      const parsed = JSON.parse(detail);
+      return parsed && typeof parsed === "object" ? parsed : null;
+    } catch {
+      return null;
+    }
+  }
+
+  function handleActiveStateEvent(event) {
+    const settings = readSettings();
+    const detail = parseJsonDetail(event && event.detail);
+    if (!detail || !detail.active) {
+      refreshCacheSuspensionState();
+      return;
+    }
+    const ttl = clampInt(detail.ttlMs, 30_000, CACHE_SUSPEND_AFTER_MUTATION_MS, CACHE_SUSPEND_AFTER_ACTIVE_MS);
+    suspendResponseCache(detail.reason || "active reply", ttl, settings);
+    debug(settings, "cache suspended after active-state signal", detail.reason || "active reply");
+  }
+
   function handleMaintenanceEvent(event) {
     const settings = readSettings();
     let detail = null;
-    const raw = event && typeof event.detail === "string" ? event.detail : "";
-    if (raw) {
-      try {
-        detail = JSON.parse(raw);
-      } catch {
-        detail = null;
-      }
-    }
+    detail = parseJsonDetail(event && event.detail);
 
     if (!settings.enabled || !settings.maintenanceEnabled || isMemoryPressureHigh()) {
       responseCache.clear();
@@ -403,6 +467,40 @@
     root.removeAttribute(TRIMMED_ATTR);
     root.removeAttribute(KEPT_ATTR);
     root.removeAttribute(STATS_ATTR);
+  }
+
+  function suspendResponseCache(reason, ttlMs, settings) {
+    const ttl = Math.max(30_000, Number(ttlMs) || CACHE_SUSPEND_AFTER_ACTIVE_MS);
+    cacheSuspendedUntil = Math.max(cacheSuspendedUntil || 0, Date.now() + ttl);
+    cacheSuspendedReason = String(reason || "active reply");
+    if (responseCache.size) responseCache.clear();
+    updateCacheSuspensionAttributes();
+    if (settings) debug(settings, "response cache suspended", cacheSuspendedReason, `${Math.round(ttl / 1000)}s`);
+  }
+
+  function isResponseCacheSuspended() {
+    refreshCacheSuspensionState();
+    return Date.now() < cacheSuspendedUntil;
+  }
+
+  function refreshCacheSuspensionState() {
+    if (cacheSuspendedUntil && Date.now() >= cacheSuspendedUntil) {
+      cacheSuspendedUntil = 0;
+      cacheSuspendedReason = "";
+      updateCacheSuspensionAttributes();
+    }
+  }
+
+  function updateCacheSuspensionAttributes() {
+    const root = document.documentElement;
+    if (!root) return;
+    if (cacheSuspendedUntil && Date.now() < cacheSuspendedUntil) {
+      root.setAttribute(CACHE_SUSPENDED_UNTIL_ATTR, String(cacheSuspendedUntil));
+      root.setAttribute(CACHE_SUSPENDED_REASON_ATTR, cacheSuspendedReason || "active reply");
+    } else {
+      root.removeAttribute(CACHE_SUSPENDED_UNTIL_ATTR);
+      root.removeAttribute(CACHE_SUSPENDED_REASON_ATTR);
+    }
   }
 
   function putCached(settings, key, value) {
@@ -459,8 +557,9 @@
   }
 
   function shouldStoreCache(settings, body, stats) {
-    if (!settings || settings.apiCacheEntries <= 0 || !body || isMemoryPressureHigh()) return false;
+    if (!settings || settings.apiCacheEntries <= 0 || !body || isMemoryPressureHigh() || isResponseCacheSuspended()) return false;
     if (stats && !stats.trimmed) return false;
+    if (stats && (stats.activeGeneration || stats.effectiveCurrentNodeChanged)) return false;
     return approximateLength(body) <= maxCacheChars(settings);
   }
 
@@ -532,25 +631,38 @@
     }
 
     const totalMappingNodes = countOwnProperties(mapping);
-    const chain = buildCurrentChain(mapping, currentNode);
+    const activeGenerationIds = collectActiveGenerationNodeIds(mapping);
+    const effectiveCurrentNode = chooseEffectiveCurrentNode(mapping, currentNode, activeGenerationIds);
+    const effectiveCurrentNodeChanged = effectiveCurrentNode !== currentNode;
+    const chain = buildCurrentChain(mapping, effectiveCurrentNode);
     if (!chain.length) return emptyTrimResult(data, totalMappingNodes);
 
     const renderableIds = chain.filter((id) => isRenderableChatNode(mapping[id]));
     const totalRenderableMessages = renderableIds.length;
-    if (totalRenderableMessages <= keepRenderableMessages) {
+    const recentSupplementCount = Math.max(4, Math.min(12, Math.ceil(Math.max(keepRenderableMessages, 2) / 2)));
+    const recentSupplementIds = collectRecentRenderableNodeIds(mapping, recentSupplementCount);
+    const protectedIds = new Set([...activeGenerationIds, ...recentSupplementIds]);
+
+    const activeGeneration = activeGenerationIds.length > 0;
+    const protectedOutsideChain = [...protectedIds].some((id) => !chain.includes(id));
+
+    if (totalRenderableMessages <= keepRenderableMessages && !effectiveCurrentNodeChanged && !protectedOutsideChain) {
       return {
         trimmed: false,
         data,
         totalRenderableMessages,
         keptRenderableMessages: totalRenderableMessages,
         totalMappingNodes,
-        keptMappingNodes: totalMappingNodes
+        keptMappingNodes: totalMappingNodes,
+        activeGeneration,
+        protectedNodeCount: protectedIds.size,
+        effectiveCurrentNodeChanged: false
       };
     }
 
-    const cutoffRenderableId = renderableIds[renderableIds.length - keepRenderableMessages];
-    const cutoffIndex = Math.max(0, chain.indexOf(cutoffRenderableId));
     const keptIds = new Set();
+    const cutoffRenderableId = renderableIds[Math.max(0, renderableIds.length - keepRenderableMessages)];
+    const cutoffIndex = cutoffRenderableId ? Math.max(0, chain.indexOf(cutoffRenderableId)) : Math.max(0, chain.length - keepRenderableMessages);
 
     for (let i = 0; i < cutoffIndex; i += 1) {
       const id = chain[i];
@@ -561,41 +673,204 @@
       keptIds.add(chain[i]);
     }
 
-    const keptChain = chain.filter((id) => keptIds.has(id));
-    if (keptChain.length === chain.length) {
+    // During generation ChatGPT may expose the partial assistant response as a child
+    // or recent branch before it updates current_node. Keep those nodes and a short
+    // ancestor bridge so the UI can continue showing streaming progress.
+    for (const id of protectedIds) {
+      addNodeWithAncestorBridge(mapping, keptIds, id, 12);
+    }
+
+    if (keptIds.size >= totalMappingNodes && !effectiveCurrentNodeChanged) {
       return {
         trimmed: false,
         data,
         totalRenderableMessages,
         keptRenderableMessages: totalRenderableMessages,
         totalMappingNodes,
-        keptMappingNodes: totalMappingNodes
+        keptMappingNodes: totalMappingNodes,
+        activeGeneration,
+        protectedNodeCount: protectedIds.size,
+        effectiveCurrentNodeChanged: false
       };
     }
 
-    const newMapping = {};
-    for (let i = 0; i < keptChain.length; i += 1) {
-      const id = keptChain[i];
-      const originalNode = mapping[id];
-      if (!originalNode || typeof originalNode !== "object") continue;
-      newMapping[id] = {
-        ...originalNode,
-        parent: i > 0 ? keptChain[i - 1] : null,
-        children: i < keptChain.length - 1 ? [keptChain[i + 1]] : []
-      };
-    }
-
+    const newMapping = buildTrimmedMapping(mapping, keptIds);
     const result = { ...data, mapping: newMapping };
-    if ("root" in result) result.root = keptChain[0] || data.root || currentNode;
+    if (newMapping[effectiveCurrentNode]) result.current_node = effectiveCurrentNode;
+    if ("root" in result) result.root = chooseRootNode(result.root, newMapping, keptIds, effectiveCurrentNode);
 
     return {
       trimmed: true,
       data: result,
       totalRenderableMessages,
-      keptRenderableMessages: keptChain.filter((id) => isRenderableChatNode(newMapping[id])).length,
+      keptRenderableMessages: countRenderableNodes(newMapping),
       totalMappingNodes,
-      keptMappingNodes: countOwnProperties(newMapping)
+      keptMappingNodes: countOwnProperties(newMapping),
+      activeGeneration,
+      protectedNodeCount: protectedIds.size,
+      effectiveCurrentNodeChanged
     };
+  }
+
+  function buildTrimmedMapping(mapping, keptIds) {
+    const parentById = new Map();
+    const childrenById = new Map();
+    const orderedIds = Object.keys(mapping).filter((id) => keptIds.has(id));
+
+    for (const id of orderedIds) {
+      const node = mapping[id];
+      const parent = nearestKeptAncestor(mapping, node && node.parent, keptIds);
+      parentById.set(id, parent);
+      if (parent) {
+        const children = childrenById.get(parent) || [];
+        if (!children.includes(id)) children.push(id);
+        childrenById.set(parent, children);
+      }
+    }
+
+    const newMapping = {};
+    for (const id of orderedIds) {
+      const originalNode = mapping[id];
+      if (!originalNode || typeof originalNode !== "object") continue;
+      newMapping[id] = {
+        ...originalNode,
+        parent: parentById.get(id) || null,
+        children: childrenById.get(id) || []
+      };
+    }
+    return newMapping;
+  }
+
+  function nearestKeptAncestor(mapping, parentId, keptIds) {
+    let id = parentId || null;
+    const visited = new Set();
+    while (id && mapping[id] && !visited.has(id)) {
+      if (keptIds.has(id)) return id;
+      visited.add(id);
+      id = mapping[id].parent || null;
+    }
+    return null;
+  }
+
+  function chooseRootNode(originalRoot, newMapping, keptIds, effectiveCurrentNode) {
+    if (originalRoot && newMapping[originalRoot]) return originalRoot;
+    for (const id of keptIds) {
+      if (newMapping[id] && !newMapping[id].parent) return id;
+    }
+    return effectiveCurrentNode;
+  }
+
+  function addNodeWithAncestorBridge(mapping, keptIds, startId, maxDepth) {
+    let id = startId;
+    let depth = 0;
+    const visited = new Set();
+    while (id && mapping[id] && !visited.has(id) && depth <= maxDepth) {
+      keptIds.add(id);
+      visited.add(id);
+      const parent = mapping[id].parent || null;
+      if (!parent || keptIds.has(parent)) break;
+      id = parent;
+      depth += 1;
+    }
+  }
+
+  function collectActiveGenerationNodeIds(mapping) {
+    const ids = [];
+    for (const id of Object.keys(mapping || {})) {
+      if (isActiveGenerationNode(mapping[id])) ids.push(id);
+    }
+    return sortNodeIdsByTime(mapping, ids);
+  }
+
+  function collectRecentRenderableNodeIds(mapping, limit) {
+    const ids = [];
+    for (const id of Object.keys(mapping || {})) {
+      if (isRenderableChatNode(mapping[id])) ids.push(id);
+    }
+    return sortNodeIdsByTime(mapping, ids).slice(-Math.max(0, limit || 0));
+  }
+
+  function sortNodeIdsByTime(mapping, ids) {
+    return ids
+      .map((id, index) => ({ id, index, time: getNodeSortTime(mapping[id]) }))
+      .sort((a, b) => (a.time - b.time) || (a.index - b.index))
+      .map((entry) => entry.id);
+  }
+
+  function getNodeSortTime(node) {
+    const message = node && node.message;
+    const candidates = [
+      message && message.update_time,
+      message && message.create_time,
+      node && node.update_time,
+      node && node.create_time
+    ];
+    for (const value of candidates) {
+      const n = Number(value);
+      if (Number.isFinite(n) && n > 0) return n;
+    }
+    return 0;
+  }
+
+  function chooseEffectiveCurrentNode(mapping, currentNode, activeGenerationIds) {
+    const activeDescendants = activeGenerationIds.filter((id) => pathContainsNode(mapping, id, currentNode));
+    if (activeDescendants.length) return activeDescendants[activeDescendants.length - 1];
+
+    const current = mapping[currentNode];
+    const currentRole = current && current.message && current.message.author && current.message.author.role;
+    if (currentRole === "user") {
+      const candidateIds = [];
+      for (const id of Object.keys(mapping || {})) {
+        const node = mapping[id];
+        const role = node && node.message && node.message.author && node.message.author.role;
+        if (role === "assistant" && isRenderableChatNode(node) && pathContainsNode(mapping, id, currentNode)) {
+          candidateIds.push(id);
+        }
+      }
+      const sorted = sortNodeIdsByTime(mapping, candidateIds);
+      if (sorted.length) return sorted[sorted.length - 1];
+    }
+
+    return currentNode;
+  }
+
+  function pathContainsNode(mapping, startId, targetId) {
+    if (!startId || !targetId) return false;
+    let id = startId;
+    const visited = new Set();
+    let depth = 0;
+    while (id && mapping[id] && !visited.has(id) && depth < 256) {
+      if (id === targetId) return true;
+      visited.add(id);
+      id = mapping[id].parent || null;
+      depth += 1;
+    }
+    return false;
+  }
+
+  function isActiveGenerationNode(node) {
+    if (!node || typeof node !== "object") return false;
+    const message = node.message;
+    if (!message || typeof message !== "object") return false;
+    const role = message.author && message.author.role;
+    if (role !== "assistant") return false;
+    const metadata = message.metadata || {};
+    if (metadata.is_visually_hidden_from_conversation === true || metadata.is_hidden_from_ui === true) return false;
+
+    const status = String(message.status || node.status || metadata.status || "").toLowerCase();
+    if (status && !/(finish|finished|success|complete|completed)/i.test(status)) return true;
+    if (message.end_turn === false) return true;
+    if (metadata.is_complete === false || metadata.complete === false) return true;
+    if (metadata.finish_details === null && status && !status.includes("success")) return true;
+    return false;
+  }
+
+  function countRenderableNodes(mapping) {
+    let count = 0;
+    for (const id of Object.keys(mapping || {})) {
+      if (isRenderableChatNode(mapping[id])) count += 1;
+    }
+    return count;
   }
 
   function emptyTrimResult(data, totalMappingNodes = 0) {
@@ -663,6 +938,29 @@
       console.debug(DEBUG_PREFIX, ...args);
     } catch {
       // Ignore console failures.
+    }
+    try {
+      window.dispatchEvent(new CustomEvent(DEBUG_EVENT, {
+        detail: {
+          source: "mainWorld",
+          version: MAIN_WORLD_VERSION,
+          args: args.map(safeDebugValue)
+        }
+      }));
+    } catch {
+      // Ignore event bridge failures.
+    }
+  }
+
+  function safeDebugValue(value) {
+    if (value instanceof Error || (value && typeof value === "object" && typeof value.message === "string" && typeof value.name === "string")) {
+      return `${value.name}: ${value.message}${value.stack ? `\n${value.stack}` : ""}`;
+    }
+    if (typeof value === "string") return value;
+    try {
+      return JSON.stringify(value);
+    } catch {
+      return String(value);
     }
   }
 })();

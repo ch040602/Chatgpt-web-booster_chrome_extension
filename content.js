@@ -1,8 +1,8 @@
 (() => {
   "use strict";
 
-  const CONTENT_VERSION = "0.6.0";
-  const CONTENT_BOOT_FLAG = "__CGPT_LONG_CHAT_LOADER_CONTENT_ACTIVE_V060__";
+  const CONTENT_VERSION = "0.8.0";
+  const CONTENT_BOOT_FLAG = "__CGPT_LONG_CHAT_LOADER_CONTENT_ACTIVE_V080__";
   if (window[CONTENT_BOOT_FLAG]) {
     try {
       window.dispatchEvent(new CustomEvent("cgpt-lb-force-scan", { detail: CONTENT_VERSION }));
@@ -21,16 +21,27 @@
   const BYPASS_KEY = "cgptLongChatLoader.bypassOnce";
   const SETTINGS_EVENT = "cgpt-lb-settings";
   const STATS_EVENT = "cgpt-lb-trim-stats";
+  const DEBUG_EVENT = "cgpt-lb-debug-log";
   const LOCATION_EVENT = "cgpt-lb-locationchange";
   const MAINTENANCE_EVENT = "cgpt-lb-maintenance";
+  const ACTIVE_STATE_EVENT = "cgpt-lb-active-state";
+  const CACHE_SUSPENDED_UNTIL_ATTR = "data-cgpt-lb-cache-suspended-until";
+  const CACHE_SUSPENDED_REASON_ATTR = "data-cgpt-lb-cache-suspended-reason";
+  const ACTIVE_REPLY_ATTR = "data-cgpt-lb-active-reply";
   const HIDDEN_CLASS = "cgpt-lb-hidden";
   const CONTAINED_CLASS = "cgpt-lb-contained";
-  const LOAD_MORE_ID = "cgpt-lb-load-more-v060";
+  const LIVE_PROTECTED_CLASS = "cgpt-lb-live-protected";
+  const LOAD_MORE_ID = "cgpt-lb-load-more-v080";
   const LEGACY_LOAD_MORE_ID = "cgpt-lb-load-more";
   const STATUS_ID = "cgpt-lb-status";
   const TRIM_MARKER_KEY = "cgptLongChatLoader.trimMarkers.v1";
+  const DEBUG_LOG_KEY = "cgptLongChatLoader.debugLog.v1";
   const TRIM_MARKER_TTL_MS = 6 * 60 * 60 * 1000;
   const MAX_TRIM_MARKERS = 20;
+  const MAX_DEBUG_LOG_ENTRIES = 500;
+  const MAX_DEBUG_ARG_LENGTH = 2000;
+  const ACTIVE_REPLY_PROTECTION_MS = 4 * 60 * 1000;
+  const ACTIVE_REPLY_IDLE_GRACE_MS = 20 * 1000;
   const TURN_SELECTOR = [
     '[data-testid^="conversation-turn-"]',
     '[data-testid*="conversation-turn"]',
@@ -86,6 +97,10 @@
   let pendingRelevantMutations = 0;
   let lastObservedTurnTotal = 0;
   let lastLoadMoreState = { visible: false, mode: "none", hiddenCount: 0, reason: "init", placement: "none" };
+  let liveReplyState = { active: false, reason: "init", lastSeenAt: 0, protectedCount: 0 };
+  let lastActiveSignalAt = 0;
+  let lastActiveSignalValue = false;
+  let debugLogWriteQueue = Promise.resolve();
 
   boot();
 
@@ -96,6 +111,8 @@
     listenForSettingsChanges();
     listenForPopupMetrics();
     listenForTrimStats();
+    listenForDebugLogEvents();
+    listenForComposerActivity();
     startNavigationWatcher();
     startMaintenanceLoop();
     window.addEventListener("cgpt-lb-force-scan", () => scheduleScan(true));
@@ -230,6 +247,43 @@
     });
   }
 
+  function listenForDebugLogEvents() {
+    window.addEventListener(DEBUG_EVENT, (event) => {
+      if (!settings.debug) return;
+      const detail = event && event.detail && typeof event.detail === "object" ? event.detail : {};
+      const source = typeof detail.source === "string" && detail.source ? detail.source : "mainWorld";
+      const args = Array.isArray(detail.args) ? detail.args : [detail.message || detail];
+      persistDebugLog(source, args);
+    });
+  }
+
+  function listenForComposerActivity() {
+    document.addEventListener("click", (event) => {
+      const target = event.target instanceof Element ? event.target : null;
+      const button = target && target.closest ? target.closest("button") : null;
+      if (!button) return;
+      const testId = String(button.getAttribute("data-testid") || "").toLowerCase();
+      const label = String(button.getAttribute("aria-label") || button.textContent || "").toLowerCase();
+      if (testId.includes("send") || label.includes("send") || label.includes("전송") || label.includes("보내")) {
+        markActiveReply("send-click", ACTIVE_REPLY_PROTECTION_MS);
+        scheduleScan(true);
+      }
+      if (testId.includes("stop") || label.includes("stop") || label.includes("중지")) {
+        markActiveReply("stop-control-visible", ACTIVE_REPLY_PROTECTION_MS);
+        scheduleScan(true);
+      }
+    }, { passive: true, capture: true });
+
+    document.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter" || event.shiftKey || event.altKey || event.ctrlKey || event.metaKey) return;
+      const target = event.target instanceof Element ? event.target : null;
+      if (!target || !target.closest) return;
+      if (target.closest("textarea, [contenteditable='true'], [role='textbox']")) {
+        markActiveReply("composer-enter", ACTIVE_REPLY_PROTECTION_MS);
+      }
+    }, { passive: true, capture: true });
+  }
+
   function startNavigationWatcher() {
     window.addEventListener(LOCATION_EVENT, checkNavigation, { passive: true });
     window.addEventListener("popstate", checkNavigation, { passive: true });
@@ -257,6 +311,7 @@
 
   function scheduleMaintenance(reason) {
     if (!settings.enabled || !settings.maintenanceEnabled || !isLikelyChatSurface() || document.hidden) return;
+    if (isActiveReplyProtected()) return;
     if (maintenanceScheduled) return;
     maintenanceScheduled = true;
 
@@ -274,6 +329,10 @@
 
   function runMaintenance(reason) {
     if (!settings.enabled || !settings.maintenanceEnabled || !isLikelyChatSurface()) return;
+    if (isActiveReplyProtected()) {
+      dispatchActiveStateToMain(true, liveReplyState.reason || "active reply", ACTIVE_REPLY_PROTECTION_MS);
+      return;
+    }
     lastMaintenanceAt = Date.now();
     dispatchMaintenanceToMain(reason);
     compactVolatileState();
@@ -363,7 +422,13 @@
         }
       }
     });
-    observer.observe(target, { childList: true, subtree: true });
+    observer.observe(target, {
+      childList: true,
+      subtree: true,
+      characterData: true,
+      attributes: true,
+      attributeFilter: ["aria-busy", "aria-label", "data-testid", "data-message-author-role", "data-streaming", "data-state", "class"]
+    });
     debug("observer target", target.tagName || target.nodeName);
   }
 
@@ -374,8 +439,28 @@
   }
 
   function isRelevantMutation(mutation) {
-    if (mutation.type !== "childList") return false;
     if (mutation.target instanceof Element && isExtensionUi(mutation.target)) return false;
+
+    if (mutation.type === "characterData") {
+      const parent = mutation.target && mutation.target.parentElement;
+      if (parent && isInsideMessageOrComposer(parent)) {
+        markActiveReply("stream-character-data", ACTIVE_REPLY_IDLE_GRACE_MS);
+        return true;
+      }
+      return false;
+    }
+
+    if (mutation.type === "attributes") {
+      const target = mutation.target instanceof Element ? mutation.target : null;
+      if (!target || isExtensionUi(target)) return false;
+      if (isStreamingIndicatorElement(target) || isInsideMessageOrComposer(target)) {
+        if (isStreamingIndicatorElement(target)) markActiveReply("stream-attribute", ACTIVE_REPLY_PROTECTION_MS);
+        return true;
+      }
+      return false;
+    }
+
+    if (mutation.type !== "childList") return false;
 
     for (const node of mutation.addedNodes) {
       if (isRelevantNode(node)) return true;
@@ -391,6 +476,26 @@
     if (isExtensionUi(node)) return false;
     if (node.matches && (node.matches(TURN_SELECTOR) || node.matches(ROLE_SELECTOR))) return true;
     return Boolean(node.querySelector && node.querySelector(`${TURN_SELECTOR}, ${ROLE_SELECTOR}`));
+  }
+
+  function isInsideMessageOrComposer(el) {
+    if (!(el instanceof Element)) return false;
+    if (isExtensionUi(el)) return false;
+    return Boolean(el.closest(`${TURN_CLOSEST_SELECTOR}, [data-testid*="composer"], form, textarea, [contenteditable='true'], [role='textbox']`));
+  }
+
+  function isStreamingIndicatorElement(el) {
+    if (!(el instanceof Element)) return false;
+    if (isExtensionUi(el)) return false;
+    const testId = String(el.getAttribute("data-testid") || "").toLowerCase();
+    const aria = String(el.getAttribute("aria-label") || "").toLowerCase();
+    const state = String(el.getAttribute("data-state") || "").toLowerCase();
+    if (el.getAttribute("aria-busy") === "true") return true;
+    if (el.getAttribute("data-streaming") === "true") return true;
+    if (testId.includes("stop") || testId.includes("stream")) return true;
+    if (aria.includes("stop") || aria.includes("중지") || aria.includes("generating") || aria.includes("생성")) return true;
+    if (state.includes("stream") || state.includes("generat")) return true;
+    return false;
   }
 
   function scheduleScan(immediate) {
@@ -737,13 +842,128 @@
     return Boolean(el && el.closest && el.closest(`#${LOAD_MORE_ID}, #${LEGACY_LOAD_MORE_ID}, #${STATUS_ID}`));
   }
 
+  function detectActiveReply(turns) {
+    const now = Date.now();
+    const detected = detectActiveReplyNow(turns);
+    if (detected.active) {
+      markActiveReply(detected.reason, ACTIVE_REPLY_PROTECTION_MS, detected.protectedCount);
+      return { ...liveReplyState };
+    }
+
+    if (isActiveReplyProtected()) {
+      return { ...liveReplyState, active: true };
+    }
+
+    if (liveReplyState.active) {
+      liveReplyState = { active: false, reason: "idle", lastSeenAt: now, protectedCount: 0 };
+      setActiveReplyAttribute(false);
+      dispatchActiveStateToMain(false, "idle", 0);
+    }
+    return { ...liveReplyState };
+  }
+
+  function detectActiveReplyNow(turns) {
+    const scope = getMessageScope();
+    const stopControl = findStopControl(scope);
+    if (stopControl) return { active: true, reason: "stop-control", protectedCount: 6 };
+
+    const busy = scope && safeQueryAll('[aria-busy="true"], [data-streaming="true"], [data-state*="stream"], [data-state*="generat"]', scope)[0];
+    if (busy) return { active: true, reason: "busy-or-streaming-marker", protectedCount: 6 };
+
+    const latest = Array.isArray(turns) && turns.length ? turns[turns.length - 1] : null;
+    if (latest && isLikelyAssistantTurn(latest) && hasStreamingMarker(latest)) {
+      return { active: true, reason: "latest-assistant-streaming", protectedCount: 6 };
+    }
+
+    return { active: false, reason: "none", protectedCount: 0 };
+  }
+
+  function findStopControl(scope) {
+    const root = scope && typeof scope.querySelectorAll === "function" ? scope : document;
+    const buttons = safeQueryAll("button, [role='button']", root);
+    return buttons.find((button) => {
+      if (isExtensionUi(button)) return false;
+      const testId = String(button.getAttribute("data-testid") || "").toLowerCase();
+      const label = String(button.getAttribute("aria-label") || button.textContent || "").toLowerCase();
+      return testId.includes("stop") || label.includes("stop") || label.includes("중지") || label.includes("정지");
+    }) || null;
+  }
+
+  function hasStreamingMarker(el) {
+    if (!(el instanceof HTMLElement)) return false;
+    if (isStreamingIndicatorElement(el)) return true;
+    return Boolean(el.querySelector && el.querySelector('[aria-busy="true"], [data-streaming="true"], [data-state*="stream"], [data-state*="generat"], .result-streaming'));
+  }
+
+  function isLikelyAssistantTurn(el) {
+    if (!(el instanceof HTMLElement)) return false;
+    const roleEl = el.matches(ROLE_SELECTOR) ? el : el.querySelector(ROLE_SELECTOR);
+    const role = roleEl && String(roleEl.getAttribute("data-message-author-role") || roleEl.getAttribute("data-message-author") || roleEl.getAttribute("data-author-role") || "").toLowerCase();
+    if (role.includes("assistant")) return true;
+    const testId = String(el.getAttribute("data-testid") || "").toLowerCase();
+    return testId.includes("assistant");
+  }
+
+  function markActiveReply(reason, ttlMs, protectedCount) {
+    const now = Date.now();
+    const count = Math.max(Number(protectedCount) || 0, liveReplyState.protectedCount || 0, 6);
+    liveReplyState = {
+      active: true,
+      reason: String(reason || "active reply"),
+      lastSeenAt: now,
+      protectedCount: count,
+      protectUntil: now + Math.max(5_000, Number(ttlMs) || ACTIVE_REPLY_IDLE_GRACE_MS)
+    };
+    setActiveReplyAttribute(true);
+    dispatchActiveStateToMain(true, liveReplyState.reason, Math.max(30_000, Number(ttlMs) || ACTIVE_REPLY_PROTECTION_MS));
+  }
+
+  function isActiveReplyProtected() {
+    return Boolean(liveReplyState.active && Number(liveReplyState.protectUntil || 0) > Date.now());
+  }
+
+  function setActiveReplyAttribute(active) {
+    const root = document.documentElement;
+    if (!root) return;
+    if (active) root.setAttribute(ACTIVE_REPLY_ATTR, "true");
+    else root.removeAttribute(ACTIVE_REPLY_ATTR);
+  }
+
+  function dispatchActiveStateToMain(active, reason, ttlMs) {
+    const now = Date.now();
+    if (active === lastActiveSignalValue && now - lastActiveSignalAt < 1200) return;
+    lastActiveSignalValue = active;
+    lastActiveSignalAt = now;
+    try {
+      window.dispatchEvent(new CustomEvent(ACTIVE_STATE_EVENT, {
+        detail: JSON.stringify({
+          active: Boolean(active),
+          reason: String(reason || "active reply"),
+          ttlMs: Math.max(0, Number(ttlMs) || 0),
+          timestamp: now,
+          pageUrl: location.href
+        })
+      }));
+    } catch {
+      // Non-critical bridge failure.
+    }
+  }
+
+  function isLiveProtectedTurn(index, total, liveState) {
+    if (!liveState || !liveState.active) return false;
+    const protectedCount = Math.max(4, Number(liveState.protectedCount) || 6);
+    return index >= Math.max(0, total - protectedCount);
+  }
+
   function applyVisibility(turns) {
     ensureUi();
     const total = turns.length;
+    const liveState = detectActiveReply(turns);
 
     if (!settings.enabled) {
       for (const el of turns) {
         removeContainment(el);
+        removeLiveProtection(el);
         showElement(el);
       }
       hideLoadMore();
@@ -756,7 +976,7 @@
       // A transient zero-turn scan can happen while ChatGPT is re-rendering, streaming,
       // or replacing the scroll root. Do not lose the full-load affordance merely
       // because the lightweight cache/stat cleanup removed the root attribute.
-      if (settings.apiTrimEnabled && (apiTrimmedCurrentConversation || hydrateTrimStateFromStorage())) {
+      if (settings.apiTrimEnabled && (apiTrimmedCurrentConversation || hydrateTrimStateFromStorage() || liveState.active)) {
         updateLoadMore(0, []);
       } else {
         hideLoadMore();
@@ -767,27 +987,44 @@
     }
 
     const baseVisibleMessages = settings.visibleTurns * 2;
-    const visibleLimit = Math.max(2, baseVisibleMessages + extraVisibleMessages);
-    const hiddenCount = Math.max(0, total - visibleLimit);
+    const liveExtra = liveState.active ? Math.max(4, Number(liveState.protectedCount) || 6) : 0;
+    const visibleLimit = Math.max(2, baseVisibleMessages + extraVisibleMessages + liveExtra);
+    let hiddenCount = Math.max(0, total - visibleLimit);
+    let actuallyHidden = 0;
 
     for (let i = 0; i < total; i += 1) {
       const el = turns[i];
+      const liveProtected = isLiveProtectedTurn(i, total, liveState);
+
+      if (liveProtected) {
+        applyLiveProtection(el);
+        removeContainment(el);
+        showElement(el);
+        continue;
+      }
+
+      removeLiveProtection(el);
       if (settings.cssContainmentEnabled) applyContainment(el);
       else removeContainment(el);
 
-      if (i < hiddenCount) hideElement(el);
-      else showElement(el);
+      if (i < hiddenCount) {
+        hideElement(el);
+        actuallyHidden += 1;
+      } else {
+        showElement(el);
+      }
     }
 
-    updateLoadMore(hiddenCount, turns);
-    updateStatus(hiddenCount, total);
-    lastDomMetrics = { total, hidden: hiddenCount, visible: Math.max(0, total - hiddenCount) };
+    updateLoadMore(actuallyHidden, turns);
+    updateStatus(actuallyHidden, total);
+    lastDomMetrics = { total, hidden: actuallyHidden, visible: Math.max(0, total - actuallyHidden) };
   }
 
   function showAllKnownTurns() {
     const turns = queryMessageTurns();
     for (const el of turns) {
       removeContainment(el);
+      removeLiveProtection(el);
       showElement(el);
     }
     hideLoadMore();
@@ -802,7 +1039,19 @@
     if (el.classList.contains(CONTAINED_CLASS)) el.classList.remove(CONTAINED_CLASS);
   }
 
+  function applyLiveProtection(el) {
+    if (!el.classList.contains(LIVE_PROTECTED_CLASS)) el.classList.add(LIVE_PROTECTED_CLASS);
+  }
+
+  function removeLiveProtection(el) {
+    if (el.classList.contains(LIVE_PROTECTED_CLASS)) el.classList.remove(LIVE_PROTECTED_CLASS);
+  }
+
   function hideElement(el) {
+    if (el.classList.contains(LIVE_PROTECTED_CLASS)) {
+      showElement(el);
+      return;
+    }
     if (el.classList.contains(HIDDEN_CLASS)) return;
     el.classList.add(HIDDEN_CLASS);
     el.setAttribute("aria-hidden", "true");
@@ -1005,9 +1254,11 @@
         pendingRelevantMutations,
         lastObservedTurnTotal
       },
+      liveReply: getLiveReplyForPopup(),
       cache: {
         entries: settings.apiCacheEntries,
-        maxKb: settings.apiCacheMaxKb
+        maxKb: settings.apiCacheMaxKb,
+        ...readCacheSuspensionState()
       },
       loadMore: {
         ...lastLoadMoreState,
@@ -1015,6 +1266,27 @@
         text: loadMoreButton && !loadMoreButton.hidden ? loadMoreButton.textContent : ""
       },
       timestamp: Date.now()
+    };
+  }
+
+  function getLiveReplyForPopup() {
+    return {
+      active: isActiveReplyProtected(),
+      reason: liveReplyState.reason || "none",
+      ageSec: liveReplyState.lastSeenAt ? Math.max(0, Math.round((Date.now() - liveReplyState.lastSeenAt) / 1000)) : null,
+      protectedCount: liveReplyState.protectedCount || 0
+    };
+  }
+
+  function readCacheSuspensionState() {
+    const root = document.documentElement;
+    const until = Number(root && root.getAttribute(CACHE_SUSPENDED_UNTIL_ATTR));
+    const reason = root ? root.getAttribute(CACHE_SUSPENDED_REASON_ATTR) : "";
+    const active = Number.isFinite(until) && until > Date.now();
+    return {
+      suspended: active,
+      suspendedReason: active ? String(reason || "active reply") : "",
+      suspendedForSec: active ? Math.max(0, Math.ceil((until - Date.now()) / 1000)) : 0
     };
   }
 
@@ -1044,6 +1316,54 @@
     } catch {
       // Ignore console failures.
     }
+    persistDebugLog("content", args);
+  }
+
+  function persistDebugLog(source, args) {
+    if (!settings.debug || !hasChromeStorage()) return;
+    const entry = buildDebugLogEntry(source, args);
+    debugLogWriteQueue = debugLogWriteQueue.then(() => appendDebugLogEntry(entry)).catch(() => {});
+  }
+
+  function appendDebugLogEntry(entry) {
+    return new Promise((resolve) => {
+      chrome.storage.local.get([DEBUG_LOG_KEY], (value) => {
+        const existing = value && Array.isArray(value[DEBUG_LOG_KEY]) ? value[DEBUG_LOG_KEY] : [];
+        const next = existing.concat(entry).slice(-MAX_DEBUG_LOG_ENTRIES);
+        chrome.storage.local.set({ [DEBUG_LOG_KEY]: next }, resolve);
+      });
+    });
+  }
+
+  function buildDebugLogEntry(source, args) {
+    const safeArgs = (Array.isArray(args) ? args : [args]).map(safeDebugValue);
+    return {
+      timestamp: new Date().toISOString(),
+      source: source || "content",
+      version: CONTENT_VERSION,
+      pageUrl: location.href,
+      routeKey: currentRouteKey(),
+      message: safeArgs.join(" "),
+      args: safeArgs
+    };
+  }
+
+  function safeDebugValue(value) {
+    let text = "";
+    if (value instanceof Error || (value && typeof value === "object" && typeof value.message === "string" && typeof value.name === "string")) {
+      text = `${value.name}: ${value.message}`;
+      if (value.stack) text += `\n${value.stack}`;
+    } else if (typeof value === "string") {
+      text = value;
+    } else {
+      try {
+        text = JSON.stringify(value);
+      } catch {
+        text = String(value);
+      }
+    }
+    if (text === undefined) text = String(value);
+    return String(text).slice(0, MAX_DEBUG_ARG_LENGTH);
   }
 
   window.addEventListener("pagehide", cleanup, { once: true });
