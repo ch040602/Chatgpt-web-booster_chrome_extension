@@ -1,52 +1,71 @@
 # ChatGPT Long Chat Loader
 
-긴 ChatGPT 대화의 브라우저 로딩과 RAM 부담을 줄이기 위한 Chrome MV3 확장입니다.
+[English README](./README.md) | [라이선스](./LICENSE) | [제3자 고지](./THIRD_PARTY_NOTICES.md) | [업데이트 호스팅](./UPDATE_HOSTING.md)
 
-기본 README는 영어입니다. 한국어 문서는 이 파일이며, popup의 **한국어 README** 버튼으로 열 수 있습니다.
+긴 ChatGPT 대화의 브라우저 로딩, 렌더링, 메모리 부담을 줄이기 위한 Chrome Manifest V3 확장 프로그램입니다.
 
-## v1.4.0 핵심 변경
+팝업에는 별도의 **프로그램 언어** 모드가 있습니다. 팝업에서 **한국어** 또는 **English**를 선택하면 UI 문구가 전환되고, README 버튼은 선택 언어에 맞는 GitHub 문서 페이지로 연결됩니다.
 
-v1.4.0은 “확장은 켜져 있는데 대화 축약/윈도잉이 전혀 안 되는 경우”와 “첫 로딩이 여전히 너무 느린 경우”를 줄이는 데 초점을 맞췄습니다. stable conversation refresh를 계속 trim하고, 자동 정리 주기마다 DOM windowing을 다시 강제 적용합니다.
+## 주요 기능
 
-### 수정/추가 사항
+- 안전한 상황에서 큰 ChatGPT conversation API 응답을 페이지 앱에 전달되기 전에 줄입니다.
+- 최근 메시지 중심의 DOM window만 보이게 하고 오래된 렌더링 메시지는 숨깁니다.
+- 답변 생성, thinking/reasoning 패널, 스트림 복구 중인 영역은 숨기거나 rewrite하지 않도록 보호합니다.
+- **더보기**로 불러온 과거 메시지를 다음 자동 정리 주기에서 다시 접습니다.
+- 팝업에서 API trim, DOM 표시/숨김, live reply 보호, 패치 상태, 캐시 상태, 업데이트 상태를 진단합니다.
+- GitHub 릴리스 ZIP 다운로드와 Chrome 관리형 업데이트 확인을 보조합니다.
 
-- live/thinking 보호로 인해 원본 통과된 최초 conversation GET이 잘못해서 “초기 trim 완료”로 기록되는 문제를 수정했습니다.
-- stable conversation refresh는 최초 1회 이후에도 계속 trim합니다. 이전처럼 첫 trim 이후 전체 원본 transcript를 통과시키지 않습니다.
-- stable conversation 응답을 실제로 파싱하고 trim했거나, 충분히 작다고 확인한 경우에만 route별 trim 상태로 기록합니다.
-- 답변 생성, thinking, reasoning, stream recovery 중인 응답은 route 최적화 완료로 기록하지 않습니다.
-- live-reply 보호 중이어도 자동 정리 주기마다 DOM windowing을 다시 적용합니다. streaming 중 전체 transcript가 렌더링되어도 오래된 메시지가 계속 보이는 상태로 남지 않게 합니다.
-- 완료된 과거 thinking/reasoning 조각은 오래된 메시지 보호 대상으로 보지 않고, 현재 live tail만 보호합니다.
-- **더 보기**로 불러온 과거 메시지는 다음 자동 정리 주기에 다시 접히도록 loaded-message auto-collapse를 추가했습니다.
-- 이미 열려 있던 탭이나 static content-script 주입이 누락된 경우를 위한 MAIN-world fallback injection을 추가했습니다.
-- popup에 **빠른 초기 로딩 프리셋**과 **패치 재주입** 버튼을 추가했습니다.
-- 첫 로딩 기본값을 더 공격적으로 낮췄습니다.
-- **더보기**로 불러온 과거 메시지를 자동 정리 주기마다 다시 접는 기능을 추가했습니다.
-- Chrome 관리형 업데이트 확인 버튼을 추가했습니다. Web Store, self-hosted CRX, enterprise-managed 설치에서는 동작할 수 있지만, 개발자 모드 unpacked 설치는 릴리스 ZIP 다운로드 후 폴더 교체가 필요합니다.
+## v1.4.0 중점
+
+v1.4.0은 확장이 실행된 것처럼 보이지만 실제로는 대화가 줄어들거나 windowing되지 않던 경우를 수정합니다. 안정 상태의 conversation refresh를 계속 trim하고, 자동 정리 중 DOM windowing을 다시 강제하며, 첫 로딩 기본 부담을 낮췄습니다.
+
+### 수정 / 변경 사항
+
+- live/thinking 우회가 최초 trim 슬롯을 잘못 소비하던 route-state 문제를 수정했습니다.
+- stable conversation refresh는 첫 trimmed GET 이후에도 계속 trim합니다.
+- stable trim 완료 상태는 응답이 실제로 파싱되고 trim되었거나 충분히 작다고 확인된 뒤에만 기록됩니다.
+- 답변 생성, thinking, reasoning, recovery 중인 응답은 route 최적화 완료로 표시하지 않습니다.
+- live-reply 보호 중에도 자동 정리 주기마다 DOM windowing을 다시 적용합니다.
+- 완료된 과거 thinking/reasoning 조각은 더 이상 오래된 메시지 보호 대상으로 보지 않습니다.
+- 불러온 과거 메시지를 설정된 최근 window로 자동 접습니다.
+- 이미 열린 탭을 위한 MAIN-world fallback injection 경로를 추가했습니다.
+- **빠른 초기 로딩 프리셋**, **패치 재주입**, GitHub 업데이트 보조 버튼을 추가했습니다.
+- 팝업 한/영 모드와 README 링크를 분리했습니다.
 
 ## 기본값
 
 | 설정 | 기본값 |
 |---|---:|
-| 확장 사용 | 켜짐 |
+| 확장 기능 사용 | 켜짐 |
 | 초기 API 응답 줄이기 | 켜짐 |
 | 네트워크 안전 모드 | 켜짐 |
-| 처음 표시할 최근 턴 | 2 |
+| 최근 턴 | 2 |
 | 더 보기 배치 | 2 |
 | API 사전 보관 배치 | 0 |
-| response micro-cache | 1개 |
-| cache 항목 상한 | 256 KB |
+| 응답 micro-cache 수 | 1 |
+| 캐시 항목 상한 | 256 KB |
 | 자동 정리 주기 | 60초 |
-| 불러온 과거 메시지 주기적 접기 | 켜짐 |
+| 불러온 과거 메시지 자동 접기 | 켜짐 |
 | 상태 배지 | 꺼짐 |
 
-이 기본값은 최신 메시지 window만 표시합니다. 이미 DOM에 렌더된 오래된 메시지는 숨겨지고, **더보기**로 batch 단위 복구할 수 있습니다. ChatGPT가 렌더링하기 전에 API에서 잘린 메시지는 전체 대화 로드 버튼으로 새로고침해야 볼 수 있습니다.
+이 기본값은 최신 메시지 window만 보이도록 유지합니다. 오래된 DOM 메시지는 숨겨지고 batch 단위로 다시 볼 수 있습니다. ChatGPT가 렌더링하기 전에 과거 메시지가 제거된 경우 ChatGPT의 전체 로드 버튼을 사용하세요.
 
-## popup 진단 항목
+## 설치
 
-popup이 열려 있을 때만 추정치를 계산합니다.
+1. 이 저장소를 다운로드하거나 clone합니다.
+2. `chrome://extensions`를 엽니다.
+3. **Developer mode**를 켭니다.
+4. **Load unpacked**를 누릅니다.
+5. 이 확장 폴더를 선택합니다.
+6. 이미 열려 있던 ChatGPT 탭을 새로고침합니다.
+7. 팝업에서 `API patch: MAIN 1.4.0`을 확인합니다.
+
+## 팝업 진단 항목
+
+팝업은 열려 있을 때만 성능 추정치를 계산합니다. 표시 항목은 다음과 같습니다.
 
 - 예상 로딩 개선 정도
-- API trim 메시지 수와 추정 크기 감소
+- API trim 개수와 추정 크기 감소
 - DOM 표시/숨김 개수
 - 응답 진행 보호 상태
 - Thinking Shield 상태
@@ -56,54 +75,41 @@ popup이 열려 있을 때만 추정치를 계산합니다.
 - 패치 상태와 fallback injection 상태
 - content/main script 버전
 
-## 설치
+## Trim이 동작하지 않을 때
 
-1. ZIP 압축을 풉니다.
-2. `chrome://extensions`를 엽니다.
-3. 개발자 모드를 켭니다.
-4. **Load unpacked**를 누릅니다.
-5. 압축 해제한 확장 폴더를 선택합니다.
-6. 기존 ChatGPT 탭을 새로고침합니다.
-7. popup에서 `API patch: MAIN 1.4.0`을 확인합니다.
-
-## 축약이 안 될 때 확인할 것
-
-popup에서 다음을 확인합니다.
+팝업에서 다음을 확인하세요.
 
 - `API patch`: `MAIN 1.4.0`이어야 합니다.
 - `패치 상태`: `MAIN 감지`가 포함되어야 합니다.
-- `Safe original pass`: idle 상태에서 계속 활성화되어 있으면 안 됩니다.
-- DOM 숨김 개수: 긴 대화에서는 0보다 커야 합니다. 계속 0이면 **패치 재주입** 후 탭을 새로고침하세요.
-- `Thinking shield`: 답변 완료 후에는 대기 상태로 돌아와야 합니다.
+- `Safe original pass`: 페이지가 idle 상태일 때 계속 활성화되어 있으면 안 됩니다.
+- DOM 숨김 개수: 긴 대화에서는 0보다 커야 합니다.
+- `Thinking shield`: 답변 완료 후에는 대기 상태여야 합니다.
 
-이미 열려 있던 탭에는 **패치 재주입**을 사용할 수 있습니다. 첫 로딩을 가장 빠르게 하려면 **빠른 초기 로딩 프리셋**을 적용한 뒤 ChatGPT 탭을 새로고침하세요.
+이미 열린 탭에서는 **패치 재주입**을 사용하세요. 첫 로딩을 가장 빠르게 하려면 **빠른 초기 로딩 프리셋**을 적용한 뒤 ChatGPT 탭을 새로고침하세요.
 
-## Unusual activity 경고 관련
+## 업데이트 보조
 
-이 확장은 OpenAI 보안 시스템을 우회하지 않습니다. ChatGPT에 unusual/suspicious activity 경고가 표시되면 safety lock 상태로 들어가 conversation response rewrite를 임시 중단합니다. VPN, proxy, 브라우저/기기 세션, 네트워크 평판, 계정 보안 상태도 확장과 무관하게 경고를 유발할 수 있습니다.
-
-## 업데이트 helper
-
-popup에 GitHub 업데이트 버튼이 있습니다. 저장소 주소는 내부 고정값을 사용하고, 별도 링크/입력란으로 표시하지 않습니다.
+팝업에는 GitHub 업데이트 버튼이 있습니다. 저장소 주소는 내부 고정값을 사용하며 별도 입력란으로 표시하지 않습니다.
 
 - **Chrome 자동 업데이트 시도**는 `chrome.runtime.requestUpdateCheck()`를 호출합니다.
-- **최신 ZIP 다운로드**는 GitHub release/source ZIP을 다운로드합니다.
+- **최신 ZIP 다운로드**는 GitHub의 최신 release/source ZIP을 다운로드합니다.
 
-개발자 모드 unpacked extension은 스스로 로컬 파일을 교체할 수 없습니다. 릴리스 기준 자동 업데이트를 사용하려면 고정 key로 CRX를 패키징하고 Chrome이 관리하는 update manifest를 배포해야 합니다. 자세한 내용은 [`UPDATE_HOSTING.md`](./UPDATE_HOSTING.md)를 참고하세요.
+개발자 모드 unpacked 확장은 자신의 로컬 파일을 자동으로 교체할 수 없습니다. 릴리스 기반 자동 업데이트를 사용하려면 고정 key로 CRX를 패키징하고 Chrome 관리형 update manifest를 배포해야 합니다. 자세한 내용은 [업데이트 호스팅](./UPDATE_HOSTING.md)을 참고하세요.
 
-## 한계
+## 제한 사항
 
-- ChatGPT 서버 응답은 확장이 trim하기 전에 먼저 다운로드되어야 합니다. 이 확장은 주로 ChatGPT React 앱에 전달되는 JSON, DOM 렌더링, layout, RAM 압력을 줄입니다.
-- 인증된 실제 긴 대화 E2E benchmark는 사용자 ChatGPT 세션에서 직접 확인해야 합니다.
-- ChatGPT DOM/API가 바뀌면 selector 또는 trim 로직 수정이 필요할 수 있습니다.
-- 서버 측 모델 context 자체를 줄이는 것은 아니며, 브라우저 로딩·렌더링·메모리 부담을 줄이는 확장입니다.
+- ChatGPT 네트워크 응답은 확장이 trim하기 전에 먼저 다운로드되어야 합니다.
+- 이 확장은 브라우저 로딩, 렌더링, 메모리 부담을 줄이는 데 집중합니다. 서버 측 모델 context는 줄이지 않습니다.
+- 인증이 필요한 긴 대화 E2E 벤치마크는 사용자의 ChatGPT 세션에서 직접 확인해야 합니다.
+- ChatGPT DOM/API 변경 시 selector 또는 trim 로직 수정이 필요할 수 있습니다.
+- 이 확장은 OpenAI 보안 시스템을 우회하지 않습니다. ChatGPT가 unusual activity 경고를 표시하면 확장은 passive safety lock에 들어가고 conversation response rewrite를 일시 중단합니다.
 
-## v1.4.0 변경 사항
+## 라이선스
 
-새로고침 후에도 모든 메시지가 계속 보이는 경우를 방지하도록 수정했습니다.
+Copyright (c) 2026 ch040602.
 
-- 안정된 idle 상태의 conversation GET은 1회만이 아니라 계속 trim합니다.
-- CSS 주입이 늦거나 누락되어도 inline `display: none !important`로 오래된 메시지를 강제로 숨깁니다.
-- 답변 생성, 생각 중, stream recovery 영역은 계속 보이게 보호하면서 오래된 메시지만 접습니다.
-- 더보기로 펼친 오래된 메시지는 답변 생성 중이 아닐 때 maintenance 주기 후 다시 접습니다.
-- 전체 대화를 표시하게 만들 수 있는 오래된 저장 설정값은 업데이트 시 안전값으로 보정합니다.
+이 프로젝트는 [MIT License](./LICENSE)로 공개되는 오픈소스입니다. 저작권 및 라이선스 고지를 포함하는 조건으로 사용, 복사, 수정, 공개, 배포, 서브라이선스, 판매가 가능합니다.
+
+ChatGPT 및 OpenAI는 OpenAI의 상표 또는 등록상표입니다. 이 프로젝트는 OpenAI와 독립적으로 제작되었으며 OpenAI의 제휴, 보증, 후원을 받지 않습니다.
+
+검토한 참고 저장소와 고지 사항은 [제3자 고지](./THIRD_PARTY_NOTICES.md)를 확인하세요.

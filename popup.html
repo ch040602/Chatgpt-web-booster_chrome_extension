@@ -31,7 +31,8 @@
     }
     label span { flex: 1; }
     input[type="number"],
-    input[type="text"] {
+    input[type="text"],
+    select {
       width: 72px;
       padding: 4px 6px;
     }
@@ -146,6 +147,14 @@
 <body>
   <h1>ChatGPT Long Chat Loader</h1>
 
+  <label>
+    <span id="languageLabel">프로그램 언어</span>
+    <select id="uiLanguage">
+      <option value="ko">한국어</option>
+      <option value="en">English</option>
+    </select>
+  </label>
+
   <div class="doc-row">
     <button id="openReadme" type="button">English README</button>
     <button id="openReadmeKo" type="button">한국어 README</button>
@@ -155,7 +164,7 @@
 
   <section class="update-box" aria-live="polite">
     <div class="metric-top">
-      <h2>GitHub 업데이트</h2>
+      <h2 id="updateTitle">GitHub 업데이트</h2>
       <button id="checkGitUpdate" type="button">업데이트 확인</button>
     </div>
     <div class="button-grid">
@@ -171,7 +180,7 @@
 
   <section id="metrics" class="metrics" aria-live="polite">
     <div class="metric-top">
-      <h2>현재 탭 추정</h2>
+      <h2 id="metricsTitle">현재 탭 추정</h2>
       <button id="refreshMetrics" type="button">다시 계산</button>
     </div>
     <div id="metricMain" class="metric-main">계산 중</div>
@@ -184,74 +193,74 @@
   </section>
 
   <label>
-    <span>확장 기능 사용</span>
+    <span id="enabledLabel">확장 기능 사용</span>
     <input id="enabled" type="checkbox">
   </label>
 
   <label>
-    <span>초기 API 응답 줄이기</span>
+    <span id="apiTrimEnabledLabel">초기 API 응답 줄이기</span>
     <input id="apiTrimEnabled" type="checkbox">
   </label>
 
   <label>
-    <span>네트워크 안전 모드</span>
+    <span id="safeNetworkModeLabel">네트워크 안전 모드</span>
     <input id="safeNetworkMode" type="checkbox">
   </label>
 
   <label>
-    <span>CSS 렌더링 containment</span>
+    <span id="cssContainmentEnabledLabel">CSS 렌더링 containment</span>
     <input id="cssContainmentEnabled" type="checkbox">
   </label>
 
   <label>
-    <span>상태 배지 표시</span>
+    <span id="showStatusLabel">상태 배지 표시</span>
     <input id="showStatus" type="checkbox">
   </label>
 
   <label>
-    <span>대화 중 자동 정리</span>
+    <span id="maintenanceEnabledLabel">대화 중 자동 정리</span>
     <input id="maintenanceEnabled" type="checkbox">
   </label>
 
   <label>
-    <span>불러온 과거 메시지 주기적 접기</span>
+    <span id="autoCollapseLoadedMessagesLabel">불러온 과거 메시지 주기적 접기</span>
     <input id="autoCollapseLoadedMessages" type="checkbox">
   </label>
 
   <label>
-    <span>자동 정리 주기(초)</span>
+    <span id="maintenanceIntervalSecLabel">자동 정리 주기(초)</span>
     <input id="maintenanceIntervalSec" type="number" min="10" max="300" step="5">
   </label>
 
   <div class="row">
     <label>
-      <span>처음 표시할 최근 턴</span>
+      <span id="visibleTurnsLabel">처음 표시할 최근 턴</span>
       <input id="visibleTurns" type="number" min="1" max="20" step="1">
     </label>
 
     <label>
-      <span>더 보기 배치</span>
+      <span id="loadMoreBatchLabel">더 보기 배치</span>
       <input id="loadMoreBatch" type="number" min="1" max="20" step="1">
     </label>
 
     <label>
-      <span>API 사전 보관 배치</span>
+      <span id="prefetchBatchesLabel">API 사전 보관 배치</span>
       <input id="prefetchBatches" type="number" min="0" max="30" step="1">
     </label>
 
     <label>
-      <span>응답 micro-cache 수</span>
+      <span id="apiCacheEntriesLabel">응답 micro-cache 수</span>
       <input id="apiCacheEntries" type="number" min="1" max="2" step="1">
     </label>
 
     <label>
-      <span>캐시 항목 상한(KB)</span>
+      <span id="apiCacheMaxKbLabel">캐시 항목 상한(KB)</span>
       <input id="apiCacheMaxKb" type="number" min="128" max="4096" step="128">
     </label>
   </div>
 
   <label>
-    <span>디버그 로그</span>
+    <span id="debugLabel">디버그 로그</span>
     <input id="debug" type="checkbox">
   </label>
 
@@ -260,7 +269,7 @@
     <button id="clearDebugLog" type="button">로그 비우기</button>
   </div>
 
-  <div class="hint">
+  <div id="popupHint" class="hint">
     응답 micro-cache는 기본 1개입니다. v1.4.0 기본값은 첫 로딩을 더 빠르게 하기 위해 최근 2턴 중심으로 시작하며, 더보기로 불러온 과거 메시지는 자동 정리 주기마다 다시 접습니다. 답변 생성·thinking/reasoning·스트림 복구 중에는 원본 conversation 응답을 통과시킵니다. 자동 설치/업데이트는 Chrome Web Store 또는 self-hosted CRX 설치에서만 Chrome update check가 가능하고, 개발자 모드 unpacked 설치는 릴리스 ZIP 다운로드 후 폴더 교체가 필요합니다.
   </div>
   <div id="saved"></div>
