@@ -977,9 +977,7 @@
     const renderSelected = (selection, jump) => {
       if (!selection) return;
       detail.dataset.targetIds = selection.targetIds.join("\t");
-      detail.textContent = selection.type === "before"
-        ? `분기 전: ${selection.before || "-"}`
-        : `분기 전: ${selection.before || "-"}\n시작: ${selection.label || "-"}`;
+      detail.textContent = formatBranchSelectionDetail(selection);
       for (const item of graph.querySelectorAll(".cgpt-lb-branch-node-action")) {
         item.classList.remove("cgpt-lb-branch-node-active");
       }
@@ -1063,7 +1061,8 @@
           type: "before",
           before: row.before,
           label: row.before,
-          targetIds: row.beforeId ? [row.beforeId] : []
+          answer: row.beforeAnswer,
+          targetIds: pairTargetIds(row.beforePair)
         },
         compact,
         onSelect: options.onSelect
@@ -1076,11 +1075,12 @@
           radius: compact ? 3.3 : 4.3,
           className: "cgpt-lb-branch-node-after",
           selection: {
-            key: `start-${row.index}-${branch.node.id || branch.index}`,
+            key: `start-${row.index}-${branch.index}`,
             type: "start",
             before: row.before,
-            label: branch.node.preview,
-            targetIds: branch.node.id ? [branch.node.id] : []
+            label: branch.node.promptPreview,
+            answer: branch.node.answerPreview,
+            targetIds: pairTargetIds(branch.node)
           },
           compact,
           onSelect: options.onSelect
@@ -1125,6 +1125,7 @@
     group.setAttribute("class", `cgpt-lb-branch-node-action cgpt-lb-branch-node-action-${selection.type}`);
     group.setAttribute("data-branch-node-key", selection.key);
     group.setAttribute("data-branch-target-id", selection.targetIds[0] || "");
+    group.setAttribute("data-branch-answer-id", selection.targetIds[1] || "");
     group.setAttribute("aria-label", selection.type === "before" ? `분기 전 ${selection.label || "-"}` : `시작 ${selection.label || "-"}`);
     if (!compact) {
       group.setAttribute("tabindex", "0");
@@ -1166,11 +1167,12 @@
     const firstBranch = Array.isArray(first.branches) ? first.branches[0] : null;
     if (firstBranch) {
       return {
-        key: `start-${first.index}-${firstBranch.id || 0}`,
+        key: `start-${first.index}-0`,
         type: "start",
         before: first.before,
-        label: firstBranch.preview,
-        targetIds: firstBranch.id ? [firstBranch.id] : []
+        label: firstBranch.promptPreview,
+        answer: firstBranch.answerPreview,
+        targetIds: pairTargetIds(firstBranch)
       };
     }
     return {
@@ -1178,8 +1180,20 @@
       type: "before",
       before: first.before,
       label: first.before,
-      targetIds: first.beforeId ? [first.beforeId] : []
+      answer: first.beforeAnswer,
+      targetIds: pairTargetIds(first.beforePair)
     };
+  }
+
+  function formatBranchSelectionDetail(selection) {
+    const lines = [];
+    if (selection.type === "before") lines.push(`분기 전: ${selection.label || "-"}`);
+    else {
+      lines.push(`분기 전: ${selection.before || "-"}`);
+      lines.push(`시작: ${selection.label || "-"}`);
+    }
+    if (selection.answer) lines.push(`응답: ${selection.answer}`);
+    return lines.join("\n");
   }
 
   function createSvgElement(tagName) {
@@ -1216,78 +1230,113 @@
         index: Number(index),
         depth: Number(index) + 1,
         before: summary && summary.before,
-        beforeId: summary && summary.beforeId || "",
+        beforeAnswer: summary && summary.beforeAnswer || "",
+        beforePair: summary && summary.beforePair || null,
         branches: Array.isArray(summary && summary.branches) ? summary.branches : []
       }))
-      .filter((row) => row.before || row.branches.length)
+      .filter((row) => row.beforePair && row.branches.length > 1)
       .sort((a, b) => a.depth - b.depth);
   }
 
   function buildBranchSummaries(path, routeState) {
     const summaries = {};
     const snapshots = routeState && Array.isArray(routeState.snapshots) ? routeState.snapshots : [];
-    const currentNodes = path.map(compactBranchNode);
+    const currentPairs = normalizePromptAnswerPairs(path);
+    const pairPaths = snapshots
+      .map(snapshotToPromptAnswerPairs)
+      .concat([currentPairs])
+      .filter((pairs) => pairs.length);
     const byIndex = new Map();
 
-    for (const snapshot of snapshots.concat({ nodes: currentNodes, ids: currentNodes.map((node) => node.id) })) {
-      const nodes = Array.isArray(snapshot.nodes)
-        ? snapshot.nodes
-        : (Array.isArray(snapshot.ids) ? snapshot.ids.map((id, index) => ({ id, index, role: "message", preview: "" })) : []);
-      nodes.forEach((node, index) => {
+    for (const pairs of pairPaths) {
+      pairs.forEach((pair, index) => {
         if (!byIndex.has(index)) byIndex.set(index, new Map());
-        byIndex.get(index).set(node.id, nodes);
+        byIndex.get(index).set(pair.key, pair);
       });
     }
 
     for (const [index, variants] of byIndex) {
       if (variants.size < 2) continue;
-      const branches = [];
-      for (const nodes of variants.values()) {
-        const startNode = findFirstUserPromptNodeAtOrAfter(nodes, index);
-        if (startNode && startNode.preview) {
-          branches.push({
-            id: startNode.id,
-            preview: startNode.preview
-          });
-        }
-      }
-      const beforeNode = findPreviousUserPromptNode(currentNodes, index - 1);
+      const beforePair = findSharedParentPair(pairPaths, index);
+      if (!beforePair) continue;
+      const branches = uniqueBranchPairs(Array.from(variants.values()));
+      if (branches.length < 2) continue;
       summaries[index] = {
-        before: beforeNode && beforeNode.preview || "",
-        beforeId: beforeNode && beforeNode.id || "",
-        branches: uniqueBranchPromptNodes(branches)
+        before: beforePair.promptPreview,
+        beforeAnswer: beforePair.answerPreview,
+        beforePair,
+        branches
       };
     }
     return summaries;
   }
 
-  function uniqueBranchPromptNodes(nodes) {
+  function snapshotToPromptAnswerPairs(snapshot) {
+    const nodes = snapshot && Array.isArray(snapshot.nodes)
+      ? snapshot.nodes
+      : (snapshot && Array.isArray(snapshot.ids) ? snapshot.ids.map((id, index) => ({ id, index, role: "message", preview: "" })) : []);
+    return normalizePromptAnswerPairs(nodes);
+  }
+
+  function normalizePromptAnswerPairs(nodes) {
+    const pairs = [];
+    let pendingPrompt = null;
+    for (const rawNode of Array.isArray(nodes) ? nodes : []) {
+      const node = compactBranchNode(rawNode);
+      if (!node.id) continue;
+      if (node.role === "user") {
+        pendingPrompt = node;
+        continue;
+      }
+      if (node.role === "assistant" && pendingPrompt) {
+        pairs.push({
+          key: `${pendingPrompt.id}\t${node.id}`,
+          promptId: pendingPrompt.id,
+          answerId: node.id,
+          promptPreview: pendingPrompt.preview,
+          answerPreview: node.preview,
+          index: pairs.length
+        });
+        pendingPrompt = null;
+      }
+    }
+    return pairs;
+  }
+
+  function findSharedParentPair(pairPaths, branchIndex) {
+    if (branchIndex <= 0) return null;
+    let parent = null;
+    for (const pairs of pairPaths) {
+      if (!pairs[branchIndex]) continue;
+      const candidate = pairs[branchIndex - 1];
+      if (!candidate) return null;
+      if (parent && parent.key !== candidate.key) return null;
+      parent = candidate;
+    }
+    return parent;
+  }
+
+  function uniqueBranchPairs(pairs) {
     const seen = new Set();
     const result = [];
-    for (const node of nodes) {
-      const key = node && (node.id || node.preview);
+    for (const pair of pairs) {
+      const key = pair && pair.key;
       if (!key || seen.has(key)) continue;
       seen.add(key);
       result.push({
-        id: String(node.id || ""),
-        preview: compactText(node.preview, 80)
+        key,
+        promptId: String(pair.promptId || ""),
+        answerId: String(pair.answerId || ""),
+        promptPreview: compactText(pair.promptPreview, 80),
+        answerPreview: compactText(pair.answerPreview, 64)
       });
     }
     return result;
   }
 
-  function findPreviousUserPromptNode(nodes, startIndex) {
-    for (let i = Math.min(startIndex, nodes.length - 1); i >= 0; i -= 1) {
-      if (nodes[i] && nodes[i].role === "user" && nodes[i].preview) return nodes[i];
-    }
-    return null;
-  }
-
-  function findFirstUserPromptNodeAtOrAfter(nodes, startIndex) {
-    for (let i = Math.max(0, startIndex); i < nodes.length; i += 1) {
-      if (nodes[i] && nodes[i].role === "user" && nodes[i].preview) return nodes[i];
-    }
-    return null;
+  function pairTargetIds(pair) {
+    if (!pair) return [];
+    return [pair.promptId, pair.answerId].filter(Boolean);
   }
 
   function jumpToBranchTargets(targetIds) {
