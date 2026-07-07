@@ -87,7 +87,11 @@
 
 #cgpt-lb-math-copy-v152[hidden],
 #cgpt-lb-math-copy-toast-v152[hidden],
-#cgpt-lb-next-prompt-toast-v152[hidden] {
+#cgpt-lb-next-prompt-toast-v152[hidden],
+#cgpt-lb-next-prompt-panel-v152[hidden],
+#cgpt-lb-next-prompt-toggle-v152[hidden],
+#cgpt-lb-branch-map-v152[hidden],
+#cgpt-lb-branch-toggle-v152[hidden] {
   display: none !important;
 }
 
@@ -143,15 +147,124 @@
   max-width: 320px;
 }
 
+#cgpt-lb-next-prompt-toggle-v152 {
+  position: fixed;
+  left: 14px;
+  top: 54px;
+  z-index: 2147483000;
+  padding: 6px 9px;
+  border: 1px solid rgba(128, 128, 128, 0.34);
+  border-radius: 999px;
+  background: color-mix(in srgb, Canvas 92%, CanvasText 8%);
+  color: CanvasText;
+  font: 11px/1.2 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.14);
+  cursor: pointer;
+  contain: layout paint style;
+}
+
+#cgpt-lb-next-prompt-panel-v152 {
+  position: fixed;
+  left: 14px;
+  top: 88px;
+  z-index: 2147482999;
+  width: 300px;
+  max-height: min(56vh, 520px);
+  overflow: auto;
+  padding: 9px;
+  border: 1px solid rgba(128, 128, 128, 0.34);
+  border-radius: 8px;
+  background: color-mix(in srgb, Canvas 93%, CanvasText 7%);
+  color: CanvasText;
+  font: 11px/1.25 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  box-shadow: 0 3px 16px rgba(0, 0, 0, 0.16);
+  contain: layout paint style;
+}
+
+#cgpt-lb-next-prompt-panel-v152 .cgpt-lb-next-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 7px;
+}
+
+#cgpt-lb-next-prompt-panel-v152 .cgpt-lb-next-panel-title {
+  font-weight: 700;
+}
+
+#cgpt-lb-next-prompt-panel-v152 .cgpt-lb-next-panel-close {
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 1px solid rgba(128, 128, 128, 0.34);
+  border-radius: 999px;
+  background: Canvas;
+  color: CanvasText;
+  font: 14px/1 system-ui;
+  cursor: pointer;
+}
+
+#cgpt-lb-next-prompt-panel-v152 .cgpt-lb-next-prompt-row {
+  display: grid;
+  gap: 4px;
+  margin: 7px 0;
+}
+
+#cgpt-lb-next-prompt-panel-v152 .cgpt-lb-next-prompt-meta {
+  font-weight: 600;
+  color: color-mix(in srgb, CanvasText 72%, Canvas 28%);
+}
+
+#cgpt-lb-next-prompt-panel-v152 textarea {
+  width: 100%;
+  box-sizing: border-box;
+  resize: vertical;
+  min-height: 42px;
+  padding: 6px;
+  border: 1px solid rgba(128, 128, 128, 0.34);
+  border-radius: 6px;
+  background: Canvas;
+  color: CanvasText;
+  font: 12px/1.35 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+#cgpt-lb-next-prompt-panel-v152 .cgpt-lb-next-prompt-remove {
+  justify-self: end;
+  padding: 4px 7px;
+  border: 1px solid rgba(128, 128, 128, 0.34);
+  border-radius: 6px;
+  background: Canvas;
+  color: CanvasText;
+  font: 11px/1.2 system-ui;
+  cursor: pointer;
+}
+
+#cgpt-lb-branch-toggle-v152 {
+  position: fixed;
+  right: 14px;
+  top: 54px;
+  z-index: 2147483000;
+  padding: 6px 9px;
+  border: 1px solid rgba(128, 128, 128, 0.34);
+  border-radius: 999px;
+  background: color-mix(in srgb, Canvas 92%, CanvasText 8%);
+  color: CanvasText;
+  font: 11px/1.2 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.14);
+  cursor: pointer;
+  contain: layout paint style;
+}
+
 #cgpt-lb-branch-map-v152 {
   position: fixed;
   right: 14px;
   top: 88px;
   z-index: 2147482999;
-  width: 188px;
-  max-height: min(46vh, 420px);
+  width: 248px;
+  max-height: min(52vh, 480px);
   overflow: auto;
-  padding: 8px;
+  padding: 9px;
   border: 1px solid rgba(128, 128, 128, 0.34);
   border-radius: 8px;
   background: color-mix(in srgb, Canvas 92%, CanvasText 8%);
@@ -163,7 +276,26 @@
 
 #cgpt-lb-branch-map-v152 .cgpt-lb-branch-title {
   font-weight: 700;
+}
+
+#cgpt-lb-branch-map-v152 .cgpt-lb-branch-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
   margin-bottom: 6px;
+}
+
+#cgpt-lb-branch-map-v152 .cgpt-lb-branch-close {
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 1px solid rgba(128, 128, 128, 0.34);
+  border-radius: 999px;
+  background: Canvas;
+  color: CanvasText;
+  font: 14px/1 system-ui;
+  cursor: pointer;
 }
 
 #cgpt-lb-branch-map-v152 .cgpt-lb-branch-list {
@@ -177,6 +309,7 @@
   align-items: center;
   gap: 4px;
   min-height: 18px;
+  padding-left: calc(var(--cgpt-lb-branch-depth, 0) * 12px);
 }
 
 #cgpt-lb-branch-map-v152 .cgpt-lb-branch-rail {
@@ -194,6 +327,16 @@
 #cgpt-lb-branch-map-v152 .cgpt-lb-branch-count {
   text-align: right;
   color: color-mix(in srgb, CanvasText 62%, Canvas 38%);
+}
+
+#cgpt-lb-branch-map-v152 .cgpt-lb-branch-detail {
+  margin: 0 0 4px calc(20px + var(--cgpt-lb-branch-depth, 0) * 12px);
+  padding: 4px 6px;
+  border-left: 2px solid color-mix(in srgb, CanvasText 32%, Canvas 68%);
+  color: color-mix(in srgb, CanvasText 78%, Canvas 22%);
+  background: color-mix(in srgb, Canvas 86%, CanvasText 14%);
+  border-radius: 6px;
+  overflow-wrap: anywhere;
 }
 
 #cgpt-lb-branch-map-v152 .cgpt-lb-branch-user .cgpt-lb-branch-rail {

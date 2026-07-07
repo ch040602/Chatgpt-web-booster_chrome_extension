@@ -10,7 +10,7 @@ function createElement(id) {
   const listeners = {};
   return {
     id,
-    type: id === "languageMode" ? "select" : id.endsWith("Enabled") || id === "enabled" || id === "showStatus" || id === "debug" ? "checkbox" : "button",
+    type: id === "languageMode" ? "select" : id.endsWith("Shortcut") ? "text" : id.endsWith("Enabled") || id === "enabled" || id === "showStatus" || id === "debug" ? "checkbox" : "button",
     value: "",
     checked: false,
     textContent: "",
@@ -27,6 +27,10 @@ function createElement(id) {
     },
     change() {
       if (listeners.change) return listeners.change({ target: this });
+      return undefined;
+    },
+    keydown(event) {
+      if (listeners.keydown) return listeners.keydown({ target: this, ...event });
       return undefined;
     }
   };
@@ -123,4 +127,34 @@ async function loadPopup(storageData = {}) {
   assert.equal(enPopup.storageData.languageMode, "ko");
   assert.equal(enPopup.document.documentElement.lang, "ko");
   assert.equal(enPopup.elements.get("enabledLabel").textContent, "확장 기능 사용");
+
+  const shortcut = enPopup.elements.get("nextPromptQueueShortcut");
+  let prevented = false;
+  await shortcut.keydown({
+    key: "k",
+    ctrlKey: true,
+    altKey: false,
+    shiftKey: true,
+    metaKey: false,
+    preventDefault() { prevented = true; },
+    stopPropagation() {}
+  });
+
+  assert.equal(prevented, true);
+  assert.equal(shortcut.value, "Ctrl+Shift+K");
+  assert.equal(enPopup.storageData.nextPromptQueueShortcut, "Ctrl+Shift+K");
+
+  const panelShortcut = enPopup.elements.get("nextPromptQueuePanelShortcut");
+  await panelShortcut.keydown({
+    key: "q",
+    ctrlKey: false,
+    altKey: true,
+    shiftKey: false,
+    metaKey: false,
+    preventDefault() {},
+    stopPropagation() {}
+  });
+
+  assert.equal(panelShortcut.value, "Alt+Q");
+  assert.equal(enPopup.storageData.nextPromptQueuePanelShortcut, "Alt+Q");
 })();

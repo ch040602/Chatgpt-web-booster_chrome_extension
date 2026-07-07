@@ -20,8 +20,8 @@ Main changes:
 - Keep GitHub repository information internal; it is not shown as an editable popup field.
 - Add clearer copyright, license, third-party notice, and release-upload guidance.
 - Prevent duplicate PowerPoint pastes by writing only one Office-facing math clipboard format at a time.
-- Show a compact branch-path panel for the currently visible ChatGPT conversation route.
-- Queue the next prompt with `Tab` by default, or with a user-configured popup shortcut, then send it after the current response and request-limit notices clear.
+- Show a compact branch tree panel for the current ChatGPT conversation route, including connected branch variants with prompt previews around branch points.
+- Queue prompts with `Tab` by default, review/edit them in a queue panel, and send them one at a time after the current response and request-limit notices clear.
 
 ## Features
 
@@ -48,9 +48,9 @@ For PowerPoint slides where the final visual result must be correct, use the flo
 
 ### Branch path and next prompt queue
 
-When **Show branch path** is enabled, the ChatGPT tab shows a compact path panel for the current visible conversation branch. The panel records the visible message IDs in `sessionStorage` for the current tab and marks positions where another ID was seen at the same depth, similar to a lightweight branch graph.
+When **Show branch path** is enabled, the ChatGPT tab shows a compact branch panel for the current conversation path plus connected branch variants previously observed in the tab. Use **Branch panel shortcut** to open or collapse it; the default is `Alt+B`. The collapsed mini overlay stays clickable and shows only a simple graph without prompt text. The panel records visible message IDs and short previews in `sessionStorage` for the current tab. At a detected branch point, it shows the last user prompt before the split and the first user prompts at the branch starts.
 
-When **Queue next prompt** is enabled, type the next prompt while ChatGPT is answering and press the configured shortcut. The default is `Tab`. The extension waits until the live response indicators disappear, then checks for request-limit text such as `Too many requests` or `rate limit`. If that notice is visible, the queued prompt remains pending and is sent only after the notice clears.
+When **Queue next prompt** is enabled, type a prompt while ChatGPT is answering and press the configured queue shortcut. The default is `Tab`. Each queued prompt appears in an editable queue panel. Open or collapse that panel with **Queue panel shortcut**; the default is `Alt+Q`, and the floating **Queue** button or collapsed queue mini overlay opens it by click. To change either shortcut, focus its popup field and press the exact key combination once. The extension sends queued prompts one by one, waiting until live response indicators disappear and request-limit text such as `Too many requests` or `rate limit` clears.
 
 ## Popup layout
 
@@ -105,8 +105,10 @@ For developer-mode/unpacked installs, Chrome cannot replace the local extension 
 | Auto cleanup during chat | on |
 | Periodically collapse loaded older messages | on |
 | Show branch path | on |
+| Branch panel shortcut | `Alt+B` |
 | Queue next prompt | on |
 | Queue shortcut | `Tab` |
+| Queue panel shortcut | `Alt+Q` |
 | Status badge | off |
 
 ## If trimming does not happen

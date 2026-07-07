@@ -20,8 +20,10 @@
     mathCopyShowSelectionButton: true,
     mathCopyPreferPngFallback: true,
     branchTrackerEnabled: true,
+    branchTrackerShortcut: "Alt+B",
     nextPromptQueueEnabled: true,
     nextPromptQueueShortcut: "Tab",
+    nextPromptQueuePanelShortcut: "Alt+Q",
     showStatus: false,
     debug: false
   });
@@ -36,7 +38,7 @@
     "apiCacheMaxKb",
     "maintenanceIntervalSec"
   ]);
-  const TEXT_SETTING_IDS = new Set(["nextPromptQueueShortcut"]);
+  const TEXT_SETTING_IDS = new Set(["branchTrackerShortcut", "nextPromptQueueShortcut", "nextPromptQueuePanelShortcut"]);
   const saved = document.getElementById("saved");
   const metricMain = document.getElementById("metricMain");
   const metricSub = document.getElementById("metricSub");
@@ -103,8 +105,10 @@
       mathCopyShowSelectionButtonLabel: "드래그 후 수식 복사 버튼",
       mathCopyPreferPngFallbackLabel: "PPT 안전 이미지 우선",
       branchTrackerEnabledLabel: "브랜치 경로 표시",
+      branchTrackerShortcutLabel: "브랜치 패널 단축키",
       nextPromptQueueEnabledLabel: "다음 질문 대기 전송",
       nextPromptQueueShortcutLabel: "대기 전송 단축키",
+      nextPromptQueuePanelShortcutLabel: "대기 목록 단축키",
       showStatusLabel: "상태 배지 표시",
       maintenanceEnabledLabel: "대화 중 자동 정리",
       autoCollapseLoadedMessagesLabel: "불러온 과거 메시지 주기적 접기",
@@ -174,8 +178,10 @@
       mathCopyShowSelectionButtonLabel: "Show formula copy button after drag",
       mathCopyPreferPngFallbackLabel: "Prefer PPT-safe image",
       branchTrackerEnabledLabel: "Show branch path",
+      branchTrackerShortcutLabel: "Branch panel shortcut",
       nextPromptQueueEnabledLabel: "Queue next prompt",
       nextPromptQueueShortcutLabel: "Queue shortcut",
+      nextPromptQueuePanelShortcutLabel: "Queue panel shortcut",
       showStatusLabel: "Show status badge",
       maintenanceEnabledLabel: "Auto cleanup during chat",
       autoCollapseLoadedMessagesLabel: "Periodically collapse loaded older messages",
@@ -220,6 +226,7 @@
       if (!el) continue;
       el.addEventListener("change", saveFromForm);
       if (el.type === "number") el.addEventListener("input", saveFromForm);
+      if (TEXT_SETTING_IDS.has(id)) el.addEventListener("keydown", captureShortcutFromKey);
     }
 
     if (refreshMetrics) refreshMetrics.addEventListener("click", requestMetricsOnce);
@@ -349,8 +356,10 @@
       mathCopyShowSelectionButton: merged.mathCopyShowSelectionButton === false ? false : true,
       mathCopyPreferPngFallback: merged.mathCopyPreferPngFallback === false ? false : true,
       branchTrackerEnabled: merged.branchTrackerEnabled === false ? false : true,
+      branchTrackerShortcut: normalizeShortcut(merged.branchTrackerShortcut || DEFAULT_SETTINGS.branchTrackerShortcut),
       nextPromptQueueEnabled: merged.nextPromptQueueEnabled === false ? false : true,
       nextPromptQueueShortcut: normalizeShortcut(merged.nextPromptQueueShortcut || DEFAULT_SETTINGS.nextPromptQueueShortcut),
+      nextPromptQueuePanelShortcut: normalizeShortcut(merged.nextPromptQueuePanelShortcut || DEFAULT_SETTINGS.nextPromptQueuePanelShortcut),
       showStatus: Boolean(merged.showStatus),
       debug: Boolean(merged.debug)
     };
@@ -1055,8 +1064,10 @@
       mathCopyShowSelectionButton: true,
       mathCopyPreferPngFallback: true,
       branchTrackerEnabled: true,
+      branchTrackerShortcut: "Alt+B",
       nextPromptQueueEnabled: true,
       nextPromptQueueShortcut: "Tab",
+      nextPromptQueuePanelShortcut: "Alt+Q",
       showStatus: false
     });
     renderSettings(next);
@@ -1126,8 +1137,33 @@
   }
 
   function normalizeTextSetting(id, value, fallback) {
-    if (id === "nextPromptQueueShortcut") return normalizeShortcut(value || fallback);
+    if (id === "branchTrackerShortcut" || id === "nextPromptQueueShortcut") return normalizeShortcut(value || fallback);
     return String(value || fallback || "").trim();
+  }
+
+  function captureShortcutFromKey(event) {
+    if (!event || !event.target) return;
+    const id = event.target.id;
+    if (!TEXT_SETTING_IDS.has(id)) return;
+    const shortcut = shortcutFromEvent(event, DEFAULT_SETTINGS[id]);
+    if (!shortcut) return;
+    if (typeof event.preventDefault === "function") event.preventDefault();
+    if (typeof event.stopPropagation === "function") event.stopPropagation();
+    event.target.value = shortcut;
+    return saveFromForm();
+  }
+
+  function shortcutFromEvent(event, fallback) {
+    const key = normalizeKeyName(event && event.key);
+    if (!key || key === "control" || key === "ctrl" || key === "alt" || key === "shift" || key === "meta") return "";
+    if (key === "backspace" || key === "delete") return fallback || DEFAULT_SETTINGS.nextPromptQueueShortcut;
+    const parts = [];
+    if (event.ctrlKey) parts.push("Ctrl");
+    if (event.altKey) parts.push("Alt");
+    if (event.shiftKey) parts.push("Shift");
+    if (event.metaKey) parts.push("Meta");
+    parts.push(formatShortcutKey(key));
+    return normalizeShortcut(parts.join("+"));
   }
 
   function normalizeShortcut(value) {

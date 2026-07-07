@@ -43,8 +43,10 @@
         if (!Object.prototype.hasOwnProperty.call(current, "mathCopyShowSelectionButton")) patch.mathCopyShowSelectionButton = true;
         if (!Object.prototype.hasOwnProperty.call(current, "mathCopyPreferPngFallback")) patch.mathCopyPreferPngFallback = true;
         if (!Object.prototype.hasOwnProperty.call(current, "branchTrackerEnabled")) patch.branchTrackerEnabled = true;
+        if (!Object.prototype.hasOwnProperty.call(current, "branchTrackerShortcut")) patch.branchTrackerShortcut = "Alt+B";
         if (!Object.prototype.hasOwnProperty.call(current, "nextPromptQueueEnabled")) patch.nextPromptQueueEnabled = true;
         if (!Object.prototype.hasOwnProperty.call(current, "nextPromptQueueShortcut")) patch.nextPromptQueueShortcut = "Tab";
+        if (!Object.prototype.hasOwnProperty.call(current, "nextPromptQueuePanelShortcut")) patch.nextPromptQueuePanelShortcut = "Alt+Q";
 
         patch[DEFAULTS_VERSION_KEY] = "1.5.3";
         if (Object.keys(patch).length) chrome.storage.local.set(patch);

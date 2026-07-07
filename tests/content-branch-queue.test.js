@@ -168,6 +168,10 @@ class ElementMock {
     return selector.split(",").some((part) => matchesSimpleSelector(this, part.trim()));
   }
 
+  input() {
+    this.dispatchEvent({ type: "input", target: this });
+  }
+
   compareDocumentPosition(other) {
     const root = getRoot(this);
     const ordered = [];
@@ -247,7 +251,17 @@ function createKeyEvent(key, target) {
   };
 }
 
-async function loadContent(storageData = {}) {
+function createModifiedKeyEvent(key, target, modifiers = {}) {
+  return {
+    ...createKeyEvent(key, target),
+    ctrlKey: Boolean(modifiers.ctrlKey),
+    altKey: Boolean(modifiers.altKey),
+    shiftKey: Boolean(modifiers.shiftKey),
+    metaKey: Boolean(modifiers.metaKey)
+  };
+}
+
+async function loadContent(storageData = {}, initialSessionValues = {}) {
   const intervals = [];
   const documentElement = new ElementMock("html");
   const head = new ElementMock("head");
@@ -325,7 +339,7 @@ async function loadContent(storageData = {}) {
     CSS: { supports: () => true }
   };
 
-  const sessionValues = new Map();
+  const sessionValues = new Map(Object.entries(initialSessionValues).map(([key, value]) => [key, String(value)]));
   const context = {
     URL,
     console,
@@ -411,14 +425,25 @@ async function loadContent(storageData = {}) {
 (async () => {
   const page = await loadContent({
     branchTrackerEnabled: true,
+    branchTrackerShortcut: "Alt+B",
     nextPromptQueueEnabled: true,
     nextPromptQueueShortcut: "Tab"
   });
 
   const graph = page.document.getElementById("cgpt-lb-branch-map-v152");
   assert.ok(graph, "branch graph should render");
-  assert.match(graph.textContent, /u1/);
-  assert.match(graph.textContent, /a1/);
+  assert.match(graph.textContent, /Question 1/);
+  assert.match(graph.textContent, /Question 2/);
+
+  const toggleEvent = createModifiedKeyEvent("b", page.body, { altKey: true });
+  page.document.dispatchEvent(toggleEvent);
+  assert.equal(toggleEvent.defaultPrevented, true);
+  assert.equal(graph.hidden, false, "branch graph stays visible as a mini overlay");
+  assert.equal(graph.classList.contains("cgpt-lb-branch-mini"), true, "branch graph shortcut collapses to mini mode");
+  assert.doesNotMatch(graph.textContent, /Question 1/, "branch mini overlay hides prompt text");
+  graph.click();
+  assert.equal(graph.classList.contains("cgpt-lb-branch-mini"), false, "clicking the branch mini overlay reopens the panel");
+  assert.match(graph.textContent, /Question 1/, "expanded branch panel restores prompt text");
 
   const event = createKeyEvent("Tab", page.composer);
   page.document.dispatchEvent(event);
@@ -434,4 +459,82 @@ async function loadContent(storageData = {}) {
   page.body.children = page.body.children.filter((child) => !/too many requests/i.test(child.textContent));
   page.intervals.forEach((callback) => callback());
   assert.equal(page.sendButton.clickCount, 1, "queued prompt sends after reply and rate-limit block clear");
+
+  const queuePage = await loadContent({
+    branchTrackerEnabled: true,
+    branchTrackerShortcut: "Alt+B",
+    nextPromptQueueEnabled: true,
+    nextPromptQueueShortcut: "Tab",
+    nextPromptQueuePanelShortcut: "Alt+Q"
+  });
+  queuePage.document.dispatchEvent(createKeyEvent("Tab", queuePage.composer));
+  queuePage.composer.textContent = "second queued prompt";
+  queuePage.document.dispatchEvent(createKeyEvent("Tab", queuePage.composer));
+
+  const queuePanel = queuePage.document.getElementById("cgpt-lb-next-prompt-panel-v152");
+  assert.ok(queuePanel, "queue panel should render");
+  const textareas = queuePanel.querySelectorAll("textarea");
+  assert.equal(textareas[0].value, "follow up question");
+  assert.equal(textareas[1].value, "second queued prompt");
+
+  const editArea = textareas[0];
+  editArea.value = "edited first prompt";
+  editArea.input();
+  queuePage.sendButton.clickCount = 0;
+  queuePage.busy.remove();
+  queuePage.intervals.forEach((callback) => callback());
+  assert.equal(queuePage.sendButton.clickCount, 1);
+  assert.equal(queuePage.composer.textContent, "edited first prompt");
+
+  const queueToggle = createModifiedKeyEvent("q", queuePage.body, { altKey: true });
+  queuePage.document.dispatchEvent(queueToggle);
+  assert.equal(queueToggle.defaultPrevented, true);
+  assert.equal(queuePanel.hidden, false, "queue panel stays visible as a mini overlay");
+  assert.equal(queuePanel.classList.contains("cgpt-lb-next-mini-panel"), true, "queue panel shortcut collapses to mini mode");
+  queuePanel.click();
+  assert.equal(queuePanel.classList.contains("cgpt-lb-next-mini-panel"), false, "clicking the queue mini overlay reopens the panel");
+
+  const queueToggleButton = queuePage.document.getElementById("cgpt-lb-next-prompt-toggle-v152");
+  assert.ok(queueToggleButton, "queue toggle button should render");
+  queueToggleButton.click();
+  assert.equal(queuePanel.classList.contains("cgpt-lb-next-mini-panel"), true, "queue toggle button collapses the panel");
+  queueToggleButton.click();
+  assert.equal(queuePanel.classList.contains("cgpt-lb-next-mini-panel"), false, "queue toggle button reopens the panel");
+
+  const branchState = {
+    "https://chatgpt.com/c/example": {
+      snapshots: [
+        {
+          ids: ["u1", "a1", "u2", "a2"],
+          nodes: [
+            { id: "u1", role: "user", index: 0, preview: "Question 1" },
+            { id: "a1", role: "assistant", index: 1, preview: "Answer 1" },
+            { id: "u2", role: "user", index: 2, preview: "Question 2" },
+            { id: "a2", role: "assistant", index: 3, preview: "Answer 2" }
+          ]
+        },
+        {
+          ids: ["u1", "a1", "u2b", "a2b"],
+          nodes: [
+            { id: "u1", role: "user", index: 0, preview: "Question 1" },
+            { id: "a1", role: "assistant", index: 1, preview: "Answer 1" },
+            { id: "u2b", role: "user", index: 2, preview: "Alternative prompt" },
+            { id: "a2b", role: "assistant", index: 3, preview: "Alternative answer" }
+          ]
+        }
+      ]
+    }
+  };
+  const branchedPage = await loadContent({
+    branchTrackerEnabled: true,
+    branchTrackerShortcut: "Alt+B",
+    nextPromptQueueEnabled: true,
+    nextPromptQueueShortcut: "Tab"
+  }, {
+    "cgptLongChatLoader.branchPaths.v1": JSON.stringify(branchState)
+  });
+  const branchedGraph = branchedPage.document.getElementById("cgpt-lb-branch-map-v152");
+  assert.match(branchedGraph.textContent, /Question 2/);
+  assert.match(branchedGraph.textContent, /Alternative prompt/);
+  assert.match(branchedGraph.textContent, /분기 전: Question 1/);
 })();

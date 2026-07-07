@@ -42,12 +42,17 @@
   const MATH_COPY_BUTTON_ID = "cgpt-lb-math-copy-v152";
   const MATH_COPY_TOAST_ID = "cgpt-lb-math-copy-toast-v152";
   const BRANCH_MAP_ID = "cgpt-lb-branch-map-v152";
+  const BRANCH_TOGGLE_BUTTON_ID = "cgpt-lb-branch-toggle-v152";
   const NEXT_PROMPT_TOAST_ID = "cgpt-lb-next-prompt-toast-v152";
+  const NEXT_PROMPT_PANEL_ID = "cgpt-lb-next-prompt-panel-v152";
+  const NEXT_PROMPT_TOGGLE_BUTTON_ID = "cgpt-lb-next-prompt-toggle-v152";
   const RUNTIME_STYLE_ID = "cgpt-lb-runtime-style-v152";
   const TRIM_MARKER_KEY = "cgptLongChatLoader.trimMarkers.v1";
   const DEBUG_LOG_KEY = "cgptLongChatLoader.debugLog.v1";
   const BRANCH_PATH_KEY = "cgptLongChatLoader.branchPaths.v1";
+  const BRANCH_PANEL_COLLAPSED_KEY = "cgptLongChatLoader.branchPanelCollapsed.v1";
   const NEXT_PROMPT_QUEUE_KEY = "cgptLongChatLoader.nextPromptQueue.v1";
+  const NEXT_PROMPT_PANEL_COLLAPSED_KEY = "cgptLongChatLoader.nextPromptPanelCollapsed.v1";
   const TRIM_MARKER_TTL_MS = 6 * 60 * 60 * 1000;
   const MAX_TRIM_MARKERS = 20;
   const MAX_DEBUG_LOG_ENTRIES = 500;
@@ -118,8 +123,10 @@
     mathCopyShowSelectionButton: true,
     mathCopyPreferPngFallback: true,
     branchTrackerEnabled: true,
+    branchTrackerShortcut: "Alt+B",
     nextPromptQueueEnabled: true,
     nextPromptQueueShortcut: "Tab",
+    nextPromptQueuePanelShortcut: "Alt+Q",
     showStatus: false,
     debug: false
   });
@@ -160,9 +167,15 @@
   let mathSelectionTimer = 0;
   let lastMathSelectionInfo = null;
   let branchMapPanel = null;
+  let branchToggleButton = null;
+  let branchMapCollapsed = readBranchPanelCollapsed();
   let nextPromptToast = null;
+  let nextPromptPanel = null;
+  let nextPromptToggleButton = null;
+  let nextPromptPanelCollapsed = readNextPromptPanelCollapsed();
   let nextPromptQueueTimer = 0;
   let nextPromptQueueState = readNextPromptQueueState();
+  let nextPromptLastSentAt = 0;
 
   boot();
 
@@ -176,6 +189,7 @@
     listenForTrimStats();
     listenForDebugLogEvents();
     listenForComposerActivity();
+    listenForBranchTrackerShortcut();
     listenForMathCopyEvents();
     startNextPromptQueueLoop();
     startNavigationWatcher();
@@ -240,8 +254,10 @@
       mathCopyShowSelectionButton: merged.mathCopyShowSelectionButton === false ? false : true,
       mathCopyPreferPngFallback: merged.mathCopyPreferPngFallback === false ? false : true,
       branchTrackerEnabled: merged.branchTrackerEnabled === false ? false : true,
+      branchTrackerShortcut: normalizeShortcut(merged.branchTrackerShortcut || DEFAULT_SETTINGS.branchTrackerShortcut),
       nextPromptQueueEnabled: merged.nextPromptQueueEnabled === false ? false : true,
       nextPromptQueueShortcut: normalizeShortcut(merged.nextPromptQueueShortcut || DEFAULT_SETTINGS.nextPromptQueueShortcut),
+      nextPromptQueuePanelShortcut: normalizeShortcut(merged.nextPromptQueuePanelShortcut || DEFAULT_SETTINGS.nextPromptQueuePanelShortcut),
       showStatus: Boolean(merged.showStatus),
       debug: Boolean(merged.debug)
     };
@@ -326,6 +342,7 @@
       if (!settings.mathCopyEnabled || !settings.mathCopyShowSelectionButton) hideMathCopyButton();
       else scheduleMathSelectionCheck();
       if (!settings.branchTrackerEnabled) removeBranchMapPanel();
+      else scheduleScan(true);
       if (!settings.nextPromptQueueEnabled) clearNextPromptQueue("disabled");
       scanAndApply();
     });
@@ -411,6 +428,66 @@
         queueNextPromptFromComposer(composer, "shortcut");
       }
     }, { capture: true });
+  }
+
+  function listenForBranchTrackerShortcut() {
+    document.addEventListener("keydown", (event) => {
+      if (settings.branchTrackerEnabled && eventMatchesShortcut(event, settings.branchTrackerShortcut)) {
+        if (typeof event.preventDefault === "function") event.preventDefault();
+        if (typeof event.stopPropagation === "function") event.stopPropagation();
+        toggleBranchMapPanel();
+        return;
+      }
+      if (settings.nextPromptQueueEnabled && eventMatchesShortcut(event, settings.nextPromptQueuePanelShortcut)) {
+        if (typeof event.preventDefault === "function") event.preventDefault();
+        if (typeof event.stopPropagation === "function") event.stopPropagation();
+        toggleNextPromptPanel();
+      }
+    }, { capture: true });
+  }
+
+  function toggleBranchMapPanel() {
+    branchMapCollapsed = !branchMapCollapsed;
+    writeBranchPanelCollapsed(branchMapCollapsed);
+    scheduleScan(true);
+    applyBranchMapCollapsedState();
+  }
+
+  function applyBranchMapCollapsedState() {
+    if (branchMapPanel) {
+      branchMapPanel.hidden = false;
+      branchMapPanel.removeAttribute("hidden");
+      if (branchMapCollapsed) {
+        branchMapPanel.classList.add("cgpt-lb-branch-mini");
+        branchMapPanel.setAttribute("role", "button");
+        branchMapPanel.setAttribute("tabindex", "0");
+      } else {
+        branchMapPanel.classList.remove("cgpt-lb-branch-mini");
+        branchMapPanel.removeAttribute("role");
+        branchMapPanel.removeAttribute("tabindex");
+      }
+      branchMapPanel.setAttribute("aria-expanded", branchMapCollapsed ? "false" : "true");
+    }
+    if (branchToggleButton) {
+      branchToggleButton.textContent = branchMapCollapsed ? "Graph" : "Hide branch";
+      branchToggleButton.setAttribute("aria-expanded", branchMapCollapsed ? "false" : "true");
+    }
+  }
+
+  function readBranchPanelCollapsed() {
+    try {
+      return sessionStorage.getItem(BRANCH_PANEL_COLLAPSED_KEY) === "true";
+    } catch {
+      return false;
+    }
+  }
+
+  function writeBranchPanelCollapsed(collapsed) {
+    try {
+      sessionStorage.setItem(BRANCH_PANEL_COLLAPSED_KEY, collapsed ? "true" : "false");
+    } catch {
+      // Panel state is non-critical.
+    }
   }
 
   function startNextPromptQueueLoop() {
@@ -744,10 +821,11 @@
     const last = Array.isArray(routeState.snapshots) ? routeState.snapshots[routeState.snapshots.length - 1] : null;
     if (!last || !arraysEqual(last.ids, ids)) {
       routeState.snapshots = (Array.isArray(routeState.snapshots) ? routeState.snapshots : [])
-        .concat({ ids, at: Date.now() })
+        .concat({ ids, nodes: path.map(compactBranchNode), at: Date.now() })
         .slice(-MAX_BRANCH_SNAPSHOTS);
     }
     routeState.current = ids;
+    routeState.currentNodes = path.map(compactBranchNode);
     routeState.updatedAt = Date.now();
     state[routeKey] = routeState;
     writeBranchPathState(state);
@@ -762,9 +840,27 @@
         id: messageId,
         role,
         index,
-        preview: compactText(turn && turn.textContent, 42)
+        preview: compactTurnPreview(turn, role)
       };
     }).filter((node) => node.id);
+  }
+
+  function compactTurnPreview(turn, role) {
+    let raw = String(turn && turn.textContent || "");
+    const rolePrefix = String(role || "").toLowerCase();
+    if (rolePrefix && raw.toLowerCase().startsWith(rolePrefix)) raw = raw.slice(rolePrefix.length);
+    raw = raw.replace(/\b(user|assistant|tool|system)\b/ig, " ");
+    const limit = role === "user" ? 54 : 38;
+    return compactText(raw, limit);
+  }
+
+  function compactBranchNode(node) {
+    return {
+      id: String(node && node.id || ""),
+      role: String(node && node.role || "message"),
+      index: Number(node && node.index) || 0,
+      preview: compactText(node && node.preview, 64)
+    };
   }
 
   function readTurnId(turn, index, role) {
@@ -793,51 +889,125 @@
   function renderBranchMap(path, routeState) {
     ensureRuntimeStyle();
     if (!document.body) return;
+    ensureBranchToggleButton();
     if (!branchMapPanel || !document.documentElement.contains(branchMapPanel)) {
       branchMapPanel = document.createElement("aside");
       branchMapPanel.id = BRANCH_MAP_ID;
       branchMapPanel.dataset.cgptLbUi = "true";
       branchMapPanel.setAttribute("aria-label", "ChatGPT branch path");
+      branchMapPanel.addEventListener("click", (event) => {
+        if (!branchMapCollapsed) return;
+        if (event.target !== branchMapPanel && !(event.target instanceof Element && event.target.closest(".cgpt-lb-branch-mini-graph"))) return;
+        toggleBranchMapPanel();
+      });
+      branchMapPanel.addEventListener("keydown", (event) => {
+        if (!branchMapCollapsed || (event.key !== "Enter" && event.key !== " ")) return;
+        if (typeof event.preventDefault === "function") event.preventDefault();
+        toggleBranchMapPanel();
+      });
       document.body.appendChild(branchMapPanel);
     }
 
     const branchCounts = countBranchAlternates(routeState);
+    const branchSummaries = buildBranchSummaries(path, routeState);
+    const treeRows = buildConnectedBranchTreeRows(path, routeState, branchCounts, branchSummaries);
     branchMapPanel.textContent = "";
 
+    if (branchMapCollapsed) {
+      renderBranchMiniOverlay(branchMapPanel, treeRows, branchCounts);
+      applyBranchMapCollapsedState();
+      return;
+    }
+
+    const header = document.createElement("div");
+    header.className = "cgpt-lb-branch-header";
     const title = document.createElement("div");
     title.className = "cgpt-lb-branch-title";
-    title.textContent = "Branch path";
-    branchMapPanel.appendChild(title);
+    title.textContent = "Branch tree";
+    const close = document.createElement("button");
+    close.type = "button";
+    close.className = "cgpt-lb-branch-close";
+    close.textContent = "×";
+    close.setAttribute("aria-label", "Hide branch panel");
+    close.addEventListener("click", toggleBranchMapPanel);
+    header.append(title, close);
+    branchMapPanel.appendChild(header);
 
     const list = document.createElement("div");
     list.className = "cgpt-lb-branch-list";
-    for (const node of path.slice(-12)) {
+    for (const row of treeRows.slice(-18)) {
+      const node = row.node;
       const item = document.createElement("div");
-      item.className = `cgpt-lb-branch-node cgpt-lb-branch-${node.role}`;
-      item.title = `${node.role} · ${node.id}${node.preview ? ` · ${node.preview}` : ""}`;
+      item.className = `cgpt-lb-branch-node cgpt-lb-branch-${node.role}${row.current ? " cgpt-lb-branch-current" : ""}`;
+      const summary = branchSummaries[node.index];
+      item.title = summary
+        ? `Branch point · before: ${summary.before || "-"} · start: ${summary.start || "-"}`
+        : `${node.role} · ${node.id}${node.preview ? ` · ${node.preview}` : ""}`;
+      item.style.setProperty("--cgpt-lb-branch-depth", String(Math.max(0, row.depth || 0)));
 
       const rail = document.createElement("span");
       rail.className = "cgpt-lb-branch-rail";
-      rail.textContent = branchCounts[node.index] > 1 ? "●" : "○";
+      rail.textContent = row.branch ? "├" : branchCounts[node.index] > 1 ? "●" : "○";
 
       const label = document.createElement("span");
       label.className = "cgpt-lb-branch-label";
-      const shortId = String(node.id).slice(0, 10);
-      label.textContent = `${node.index + 1}. ${node.role[0] || "m"}:${shortId}`;
+      label.textContent = `${node.index + 1}. ${formatRoleLabel(node.role)} ${node.preview || String(node.id).slice(0, 10)}`;
 
       const branches = document.createElement("span");
       branches.className = "cgpt-lb-branch-count";
-      branches.textContent = branchCounts[node.index] > 1 ? `x${branchCounts[node.index]}` : "";
+      branches.textContent = row.branch ? "alt" : branchCounts[node.index] > 1 ? `x${branchCounts[node.index]}` : "";
 
       item.append(rail, label, branches);
       list.appendChild(item);
+
+      if (summary && row.current) {
+        const detail = document.createElement("div");
+        detail.className = "cgpt-lb-branch-detail";
+        detail.style.setProperty("--cgpt-lb-branch-depth", String(Math.max(0, row.depth || 0)));
+        detail.textContent = `분기 전: ${summary.before || "-"} · 시작: ${summary.start || "-"}`;
+        list.appendChild(detail);
+      }
     }
     branchMapPanel.appendChild(list);
+    applyBranchMapCollapsedState();
+  }
+
+  function renderBranchMiniOverlay(panel, treeRows, branchCounts) {
+    const mini = document.createElement("div");
+    mini.className = "cgpt-lb-branch-mini-graph";
+    mini.setAttribute("aria-label", "Open branch tree");
+    for (const row of treeRows.slice(-16)) {
+      const dot = document.createElement("span");
+      dot.className = `cgpt-lb-branch-mini-dot${row.branch ? " cgpt-lb-branch-mini-alt" : ""}`;
+      dot.style.setProperty("--cgpt-lb-branch-depth", String(Math.max(0, row.depth || 0)));
+      dot.textContent = row.branch ? "└" : branchCounts[row.node.index] > 1 ? "●" : "○";
+      dot.title = `Node ${Number(row.node.index) + 1}`;
+      mini.appendChild(dot);
+    }
+    panel.appendChild(mini);
   }
 
   function removeBranchMapPanel() {
     if (branchMapPanel && branchMapPanel.parentElement) branchMapPanel.remove();
+    if (branchToggleButton && branchToggleButton.parentElement) branchToggleButton.remove();
     branchMapPanel = null;
+    branchToggleButton = null;
+  }
+
+  function ensureBranchToggleButton() {
+    if (!document.body) return;
+    if (!branchToggleButton || !document.documentElement.contains(branchToggleButton)) {
+      branchToggleButton = document.createElement("button");
+      branchToggleButton.id = BRANCH_TOGGLE_BUTTON_ID;
+      branchToggleButton.type = "button";
+      branchToggleButton.dataset.cgptLbUi = "true";
+      branchToggleButton.title = `Toggle branch panel (${settings.branchTrackerShortcut})`;
+      branchToggleButton.addEventListener("click", toggleBranchMapPanel);
+      document.body.appendChild(branchToggleButton);
+    }
+    branchToggleButton.hidden = false;
+    branchToggleButton.removeAttribute("hidden");
+    applyBranchMapCollapsedState();
   }
 
   function countBranchAlternates(routeState) {
@@ -853,6 +1023,140 @@
     }
     for (const [index, values] of byIndex) counts[index] = values.size;
     return counts;
+  }
+
+  function buildConnectedBranchTreeRows(path, routeState, branchCounts, branchSummaries) {
+    const currentNodes = path.map(compactBranchNode);
+    const rows = currentNodes.map((node) => ({ node, depth: 0, current: true, branch: false }));
+    const inserted = new Set(currentNodes.map((node) => node.id));
+    const variants = collectSnapshotNodes(routeState).filter((nodes) => sharesPrefix(nodes, currentNodes));
+
+    for (const [index, count] of Object.entries(branchCounts)) {
+      const depth = Number(index);
+      if (!Number.isFinite(depth) || count < 2) continue;
+      const currentId = currentNodes[depth] && currentNodes[depth].id;
+      const alternatives = [];
+      for (const nodes of variants) {
+        const node = nodes[depth];
+        if (!node || node.id === currentId || inserted.has(node.id)) continue;
+        const start = findFirstUserPromptAtOrAfter(nodes, depth) || node.preview;
+        alternatives.push({
+          node: {
+            ...node,
+            preview: compactText(start || node.preview || node.id, 64)
+          },
+          depth: depth + 1,
+          current: false,
+          branch: true
+        });
+        inserted.add(node.id);
+      }
+      if (!alternatives.length) continue;
+      const insertAt = findRowInsertIndex(rows, depth);
+      rows.splice(insertAt, 0, ...alternatives);
+      const summary = branchSummaries[depth];
+      if (summary) {
+        rows.splice(insertAt + alternatives.length, 0, {
+          node: {
+            id: `branch-summary-${depth}`,
+            role: "message",
+            index: depth,
+            preview: `분기 전: ${summary.before || "-"} · 시작: ${summary.start || "-"}`
+          },
+          depth: depth + 1,
+          current: false,
+          branch: true,
+          summaryOnly: true
+        });
+      }
+    }
+    return rows.filter((row) => row && row.node && !row.summaryOnly);
+  }
+
+  function collectSnapshotNodes(routeState) {
+    const snapshots = routeState && Array.isArray(routeState.snapshots) ? routeState.snapshots : [];
+    const rows = [];
+    for (const snapshot of snapshots) {
+      const nodes = Array.isArray(snapshot.nodes)
+        ? snapshot.nodes.map(compactBranchNode)
+        : (Array.isArray(snapshot.ids) ? snapshot.ids.map((id, index) => ({ id, index, role: "message", preview: "" })) : []);
+      if (nodes.length) rows.push(nodes);
+    }
+    if (routeState && Array.isArray(routeState.currentNodes)) rows.push(routeState.currentNodes.map(compactBranchNode));
+    return rows;
+  }
+
+  function sharesPrefix(left, right) {
+    if (!left.length || !right.length) return false;
+    const limit = Math.min(left.length, right.length);
+    for (let i = 0; i < limit; i += 1) {
+      if (!left[i] || !right[i] || left[i].id !== right[i].id) return i > 0;
+    }
+    return true;
+  }
+
+  function findRowInsertIndex(rows, depth) {
+    let index = rows.findIndex((row) => row.node && row.node.index === depth);
+    if (index < 0) return rows.length;
+    index += 1;
+    while (index < rows.length && rows[index].depth > 0 && rows[index].node.index <= depth) index += 1;
+    return index;
+  }
+
+  function buildBranchSummaries(path, routeState) {
+    const summaries = {};
+    const snapshots = routeState && Array.isArray(routeState.snapshots) ? routeState.snapshots : [];
+    const currentNodes = path.map(compactBranchNode);
+    const byIndex = new Map();
+
+    for (const snapshot of snapshots.concat({ nodes: currentNodes, ids: currentNodes.map((node) => node.id) })) {
+      const nodes = Array.isArray(snapshot.nodes)
+        ? snapshot.nodes
+        : (Array.isArray(snapshot.ids) ? snapshot.ids.map((id, index) => ({ id, index, role: "message", preview: "" })) : []);
+      nodes.forEach((node, index) => {
+        if (!byIndex.has(index)) byIndex.set(index, new Map());
+        byIndex.get(index).set(node.id, nodes);
+      });
+    }
+
+    for (const [index, variants] of byIndex) {
+      if (variants.size < 2) continue;
+      const starts = [];
+      for (const nodes of variants.values()) {
+        const start = findFirstUserPromptAtOrAfter(nodes, index);
+        if (start) starts.push(start);
+      }
+      summaries[index] = {
+        before: findPreviousUserPrompt(currentNodes, index - 1),
+        start: compactText(uniqueStrings(starts).join(" / "), 80)
+      };
+    }
+    return summaries;
+  }
+
+  function findPreviousUserPrompt(nodes, startIndex) {
+    for (let i = Math.min(startIndex, nodes.length - 1); i >= 0; i -= 1) {
+      if (nodes[i] && nodes[i].role === "user" && nodes[i].preview) return nodes[i].preview;
+    }
+    return "";
+  }
+
+  function findFirstUserPromptAtOrAfter(nodes, startIndex) {
+    for (let i = Math.max(0, startIndex); i < nodes.length; i += 1) {
+      if (nodes[i] && nodes[i].role === "user" && nodes[i].preview) return nodes[i].preview;
+    }
+    return "";
+  }
+
+  function uniqueStrings(values) {
+    return Array.from(new Set(values.filter(Boolean)));
+  }
+
+  function formatRoleLabel(role) {
+    if (role === "user") return "Prompt";
+    if (role === "assistant") return "Reply";
+    if (role === "tool") return "Tool";
+    return "Node";
   }
 
   function readBranchPathState() {
@@ -879,14 +1183,18 @@
       showNextPromptToast("No prompt to queue.");
       return false;
     }
-    nextPromptQueueState = {
-      queued: true,
+    const state = normalizeNextPromptQueueState(nextPromptQueueState);
+    state.items.push({
+      id: `q-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`,
       prompt,
       routeKey: currentRouteKey(),
       source: String(source || "shortcut"),
       queuedAt: Date.now()
-    };
+    });
+    state.queued = state.items.length > 0;
+    nextPromptQueueState = state;
     writeNextPromptQueueState(nextPromptQueueState);
+    renderNextPromptPanel();
     showNextPromptToast(describeNextPromptQueueWait());
     processNextPromptQueue("queue");
     return true;
@@ -894,18 +1202,25 @@
 
   function processNextPromptQueue(reason) {
     if (!settings.nextPromptQueueEnabled || !isLikelyChatSurface()) return;
-    const state = nextPromptQueueState && nextPromptQueueState.queued ? nextPromptQueueState : readNextPromptQueueState();
-    if (!state || !state.queued) return;
+    const state = normalizeNextPromptQueueState(nextPromptQueueState && nextPromptQueueState.queued ? nextPromptQueueState : readNextPromptQueueState());
+    const initialQueueLength = state.items.length;
+    while (state.items.length && !String(state.items[0].prompt || "").trim()) state.items.shift();
+    if (!state.items.length) {
+      clearNextPromptQueue("empty-prompt");
+      return;
+    }
+    if (nextPromptLastSentAt && Date.now() - nextPromptLastSentAt < 1200) return;
+    state.queued = true;
     nextPromptQueueState = state;
+    if (state.items.length !== initialQueueLength) writeNextPromptQueueState(state);
+    renderNextPromptPanel();
+    const currentItem = state.items[0];
 
     const composer = findComposer();
     if (!composer) {
       showNextPromptToast("Next prompt queued · waiting for composer");
       return;
     }
-
-    const currentText = readComposerText(composer);
-    if (!currentText && state.prompt) writeComposerText(composer, state.prompt);
 
     if (isReplyActiveInDom()) {
       showNextPromptToast("Next prompt queued · waiting for response");
@@ -917,6 +1232,7 @@
       return;
     }
 
+    if (currentItem.prompt) writeComposerText(composer, currentItem.prompt);
     const prompt = readComposerText(composer);
     if (!prompt) {
       showNextPromptToast("Next prompt queued · waiting for text");
@@ -931,9 +1247,22 @@
 
     debug("queued prompt send", { reason, promptLength: prompt.length });
     sendButton.click();
-    clearNextPromptQueue("sent");
+    nextPromptLastSentAt = Date.now();
+    dequeueNextPromptItem("sent");
     markActiveReply("queued-next-prompt-send", ACTIVE_REPLY_PROTECTION_MS);
     showNextPromptToast("Queued prompt sent.");
+  }
+
+  function dequeueNextPromptItem(reason) {
+    const state = normalizeNextPromptQueueState(nextPromptQueueState);
+    state.items.shift();
+    state.queued = state.items.length > 0;
+    state.updatedAt = Date.now();
+    state.reason = String(reason || "dequeue");
+    nextPromptQueueState = state;
+    if (state.items.length) writeNextPromptQueueState(state);
+    else clearNextPromptQueue(reason || "empty");
+    renderNextPromptPanel();
   }
 
   function isReplyActiveInDom() {
@@ -1039,7 +1368,7 @@
     try {
       const raw = sessionStorage.getItem(NEXT_PROMPT_QUEUE_KEY);
       const parsed = raw ? JSON.parse(raw) : null;
-      return parsed && typeof parsed === "object" ? parsed : { queued: false };
+      return normalizeNextPromptQueueState(parsed);
     } catch {
       return { queued: false };
     }
@@ -1047,18 +1376,223 @@
 
   function writeNextPromptQueueState(state) {
     try {
-      sessionStorage.setItem(NEXT_PROMPT_QUEUE_KEY, JSON.stringify(state || { queued: false }));
+      sessionStorage.setItem(NEXT_PROMPT_QUEUE_KEY, JSON.stringify(normalizeNextPromptQueueState(state)));
     } catch {
       // Keep the in-memory queue if sessionStorage is unavailable.
     }
   }
 
   function clearNextPromptQueue(reason) {
-    nextPromptQueueState = { queued: false, clearedAt: Date.now(), reason: String(reason || "clear") };
+    nextPromptQueueState = { queued: false, items: [], clearedAt: Date.now(), reason: String(reason || "clear") };
     try {
       sessionStorage.removeItem(NEXT_PROMPT_QUEUE_KEY);
     } catch {
       // Ignore storage cleanup failures.
+    }
+    renderNextPromptPanel();
+  }
+
+  function normalizeNextPromptQueueState(value) {
+    const source = value && typeof value === "object" ? value : {};
+    let items = Array.isArray(source.items) ? source.items : [];
+    if (!items.length && source.queued && source.prompt) {
+      items = [{
+        id: `legacy-${Number(source.queuedAt) || Date.now()}`,
+        prompt: source.prompt,
+        routeKey: source.routeKey || currentRouteKey(),
+        source: source.source || "legacy",
+        queuedAt: source.queuedAt || Date.now()
+      }];
+    }
+    const normalized = items
+      .map((item, index) => ({
+        id: String(item && item.id || `q-${index}`),
+        prompt: String(item && item.prompt || ""),
+        routeKey: String(item && item.routeKey || currentRouteKey()),
+        source: String(item && item.source || "shortcut"),
+        queuedAt: Number(item && item.queuedAt) || Date.now()
+      }));
+    return {
+      ...source,
+      queued: normalized.length > 0,
+      items: normalized
+    };
+  }
+
+  function renderNextPromptPanel() {
+    const state = normalizeNextPromptQueueState(nextPromptQueueState);
+    if (!settings.nextPromptQueueEnabled || !state.items.length) {
+      hideNextPromptPanelIfEmpty();
+      return;
+    }
+    ensureRuntimeStyle();
+    if (!document.body) return;
+    ensureNextPromptToggleButton(state.items.length);
+    if (!nextPromptPanel || !document.documentElement.contains(nextPromptPanel)) {
+      nextPromptPanel = document.createElement("section");
+      nextPromptPanel.id = NEXT_PROMPT_PANEL_ID;
+      nextPromptPanel.dataset.cgptLbUi = "true";
+      nextPromptPanel.setAttribute("aria-label", "Queued prompts");
+      nextPromptPanel.addEventListener("click", (event) => {
+        if (!nextPromptPanelCollapsed) return;
+        if (event.target !== nextPromptPanel && !(event.target instanceof Element && event.target.closest(".cgpt-lb-next-mini"))) return;
+        toggleNextPromptPanel();
+      });
+      nextPromptPanel.addEventListener("keydown", (event) => {
+        if (!nextPromptPanelCollapsed || (event.key !== "Enter" && event.key !== " ")) return;
+        if (typeof event.preventDefault === "function") event.preventDefault();
+        toggleNextPromptPanel();
+      });
+      document.body.appendChild(nextPromptPanel);
+    }
+    nextPromptPanel.textContent = "";
+
+    if (nextPromptPanelCollapsed) {
+      renderNextPromptMiniOverlay(nextPromptPanel, state.items.length);
+      applyNextPromptPanelCollapsedState();
+      return;
+    }
+
+    const header = document.createElement("div");
+    header.className = "cgpt-lb-next-panel-header";
+    const title = document.createElement("div");
+    title.className = "cgpt-lb-next-panel-title";
+    title.textContent = `Queued prompts (${state.items.length})`;
+    const close = document.createElement("button");
+    close.type = "button";
+    close.className = "cgpt-lb-next-panel-close";
+    close.textContent = "×";
+    close.setAttribute("aria-label", "Hide queued prompts");
+    close.addEventListener("click", toggleNextPromptPanel);
+    header.append(title, close);
+    nextPromptPanel.appendChild(header);
+
+    state.items.forEach((item, index) => {
+      const row = document.createElement("label");
+      row.className = "cgpt-lb-next-prompt-row";
+      const meta = document.createElement("span");
+      meta.className = "cgpt-lb-next-prompt-meta";
+      meta.textContent = index === 0 ? "Next to send" : `Queue ${index + 1}`;
+      const textarea = document.createElement("textarea");
+      textarea.value = item.prompt;
+      textarea.rows = Math.min(5, Math.max(2, Math.ceil(item.prompt.length / 48)));
+      textarea.dataset.queueId = item.id;
+      textarea.addEventListener("input", () => updateQueuedPrompt(item.id, textarea.value));
+      const remove = document.createElement("button");
+      remove.type = "button";
+      remove.className = "cgpt-lb-next-prompt-remove";
+      remove.textContent = "Remove";
+      remove.addEventListener("click", () => removeQueuedPrompt(item.id));
+      row.append(meta, textarea, remove);
+      nextPromptPanel.appendChild(row);
+    });
+    applyNextPromptPanelCollapsedState();
+  }
+
+  function renderNextPromptMiniOverlay(panel, count) {
+    const mini = document.createElement("div");
+    mini.className = "cgpt-lb-next-mini";
+    mini.setAttribute("aria-label", "Open queued prompts");
+    const countText = document.createElement("span");
+    countText.className = "cgpt-lb-next-mini-count";
+    countText.textContent = `Queue ${count || 0}`;
+    const bars = document.createElement("span");
+    bars.className = "cgpt-lb-next-mini-bars";
+    const visible = Math.max(1, Math.min(4, count || 1));
+    for (let index = 0; index < visible; index += 1) {
+      const bar = document.createElement("span");
+      bar.textContent = "";
+      bars.appendChild(bar);
+    }
+    mini.append(countText, bars);
+    panel.appendChild(mini);
+  }
+
+  function updateQueuedPrompt(id, prompt) {
+    const state = normalizeNextPromptQueueState(nextPromptQueueState);
+    const item = state.items.find((candidate) => candidate.id === id);
+    if (!item) return;
+    item.prompt = String(prompt || "");
+    state.queued = state.items.length > 0;
+    nextPromptQueueState = state;
+    if (state.items.length) writeNextPromptQueueState(state);
+    else clearNextPromptQueue("edited-empty");
+  }
+
+  function removeQueuedPrompt(id) {
+    const state = normalizeNextPromptQueueState(nextPromptQueueState);
+    state.items = state.items.filter((item) => item.id !== id);
+    state.queued = state.items.length > 0;
+    nextPromptQueueState = state;
+    if (state.items.length) writeNextPromptQueueState(state);
+    else clearNextPromptQueue("removed");
+    renderNextPromptPanel();
+  }
+
+  function ensureNextPromptToggleButton(count) {
+    if (!document.body) return;
+    if (!nextPromptToggleButton || !document.documentElement.contains(nextPromptToggleButton)) {
+      nextPromptToggleButton = document.createElement("button");
+      nextPromptToggleButton.id = NEXT_PROMPT_TOGGLE_BUTTON_ID;
+      nextPromptToggleButton.type = "button";
+      nextPromptToggleButton.dataset.cgptLbUi = "true";
+      nextPromptToggleButton.title = `Toggle queued prompts (${settings.nextPromptQueuePanelShortcut})`;
+      nextPromptToggleButton.addEventListener("click", toggleNextPromptPanel);
+      document.body.appendChild(nextPromptToggleButton);
+    }
+    nextPromptToggleButton.hidden = false;
+    nextPromptToggleButton.removeAttribute("hidden");
+    nextPromptToggleButton.textContent = `Queue ${count || 0}`;
+    applyNextPromptPanelCollapsedState();
+  }
+
+  function toggleNextPromptPanel() {
+    nextPromptPanelCollapsed = !nextPromptPanelCollapsed;
+    writeNextPromptPanelCollapsed(nextPromptPanelCollapsed);
+    renderNextPromptPanel();
+    applyNextPromptPanelCollapsedState();
+  }
+
+  function applyNextPromptPanelCollapsedState() {
+    if (nextPromptPanel) {
+      nextPromptPanel.hidden = false;
+      nextPromptPanel.removeAttribute("hidden");
+      if (nextPromptPanelCollapsed) {
+        nextPromptPanel.classList.add("cgpt-lb-next-mini-panel");
+        nextPromptPanel.setAttribute("role", "button");
+        nextPromptPanel.setAttribute("tabindex", "0");
+      } else {
+        nextPromptPanel.classList.remove("cgpt-lb-next-mini-panel");
+        nextPromptPanel.removeAttribute("role");
+        nextPromptPanel.removeAttribute("tabindex");
+      }
+      nextPromptPanel.setAttribute("aria-expanded", nextPromptPanelCollapsed ? "false" : "true");
+    }
+    if (nextPromptToggleButton) {
+      nextPromptToggleButton.setAttribute("aria-expanded", nextPromptPanelCollapsed ? "false" : "true");
+    }
+  }
+
+  function hideNextPromptPanelIfEmpty() {
+    if (nextPromptPanel && nextPromptPanel.parentElement) nextPromptPanel.remove();
+    if (nextPromptToggleButton && nextPromptToggleButton.parentElement) nextPromptToggleButton.remove();
+    nextPromptPanel = null;
+    nextPromptToggleButton = null;
+  }
+
+  function readNextPromptPanelCollapsed() {
+    try {
+      return sessionStorage.getItem(NEXT_PROMPT_PANEL_COLLAPSED_KEY) === "true";
+    } catch {
+      return false;
+    }
+  }
+
+  function writeNextPromptPanelCollapsed(collapsed) {
+    try {
+      sessionStorage.setItem(NEXT_PROMPT_PANEL_COLLAPSED_KEY, collapsed ? "true" : "false");
+    } catch {
+      // Panel state is non-critical.
     }
   }
 
@@ -1487,7 +2021,7 @@
     if (!containsWithinScope(scope, el)) return false;
     if (el.closest("nav, aside, header, footer, [data-testid='conversation-sidebar']")) return false;
     if (el.matches("nav, aside, header, footer")) return false;
-    if (el.id === LOAD_MORE_ID || el.id === LEGACY_LOAD_MORE_ID || el.id === STATUS_ID || el.id === BRANCH_MAP_ID || el.id === NEXT_PROMPT_TOAST_ID) return false;
+    if (el.id === LOAD_MORE_ID || el.id === LEGACY_LOAD_MORE_ID || el.id === STATUS_ID || el.id === BRANCH_MAP_ID || el.id === BRANCH_TOGGLE_BUTTON_ID || el.id === NEXT_PROMPT_TOAST_ID || el.id === NEXT_PROMPT_PANEL_ID || el.id === NEXT_PROMPT_TOGGLE_BUTTON_ID) return false;
 
     const testId = String(el.getAttribute("data-testid") || "");
     if (testId.includes("conversation-turn")) return true;
@@ -1536,7 +2070,7 @@
   }
 
   function isExtensionUi(el) {
-    return Boolean(el && el.closest && el.closest(`#${LOAD_MORE_ID}, #${LEGACY_LOAD_MORE_ID}, #${STATUS_ID}, #${MATH_COPY_BUTTON_ID}, #${MATH_COPY_TOAST_ID}, #${BRANCH_MAP_ID}, #${NEXT_PROMPT_TOAST_ID}, [data-cgpt-lb-ui="true"]`));
+    return Boolean(el && el.closest && el.closest(`#${LOAD_MORE_ID}, #${LEGACY_LOAD_MORE_ID}, #${STATUS_ID}, #${MATH_COPY_BUTTON_ID}, #${MATH_COPY_TOAST_ID}, #${BRANCH_MAP_ID}, #${BRANCH_TOGGLE_BUTTON_ID}, #${NEXT_PROMPT_TOAST_ID}, #${NEXT_PROMPT_PANEL_ID}, #${NEXT_PROMPT_TOGGLE_BUTTON_ID}, [data-cgpt-lb-ui="true"]`));
   }
 
   function detectActiveReply(turns) {
@@ -2058,18 +2592,43 @@
     style.textContent = `
       .${HIDDEN_CLASS},[data-cgpt-lb-hidden="true"]{display:none!important;content-visibility:hidden!important;}
       .${LIVE_PROTECTED_CLASS}{content-visibility:visible!important;contain-intrinsic-size:unset!important;}
-      #${MATH_COPY_BUTTON_ID}[hidden],#${MATH_COPY_TOAST_ID}[hidden],#${NEXT_PROMPT_TOAST_ID}[hidden]{display:none!important;}
+      #${MATH_COPY_BUTTON_ID}[hidden],#${MATH_COPY_TOAST_ID}[hidden],#${NEXT_PROMPT_TOAST_ID}[hidden],#${NEXT_PROMPT_PANEL_ID}[hidden],#${NEXT_PROMPT_TOGGLE_BUTTON_ID}[hidden],#${BRANCH_MAP_ID}[hidden],#${BRANCH_TOGGLE_BUTTON_ID}[hidden]{display:none!important;}
       #${MATH_COPY_BUTTON_ID}{position:fixed;z-index:2147483001;padding:7px 10px;border:1px solid rgba(128,128,128,.38);border-radius:999px;background:color-mix(in srgb, Canvas 94%, CanvasText 6%);color:CanvasText;font:12px/1.2 system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;box-shadow:0 3px 14px rgba(0,0,0,.18);cursor:pointer;contain:layout paint style;max-width:220px;white-space:nowrap;}
       #${MATH_COPY_BUTTON_ID}:hover{background:color-mix(in srgb, Canvas 86%, CanvasText 14%);}
       #${MATH_COPY_TOAST_ID}{position:fixed;right:14px;bottom:14px;z-index:2147483001;padding:7px 10px;border-radius:10px;background:color-mix(in srgb, CanvasText 86%, Canvas 14%);color:Canvas;font:12px/1.25 system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;box-shadow:0 3px 16px rgba(0,0,0,.22);contain:layout paint style;pointer-events:none;max-width:320px;}
       #${NEXT_PROMPT_TOAST_ID}{position:fixed;right:14px;bottom:54px;z-index:2147483001;padding:7px 10px;border-radius:10px;background:color-mix(in srgb, CanvasText 84%, Canvas 16%);color:Canvas;font:12px/1.25 system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;box-shadow:0 3px 16px rgba(0,0,0,.20);contain:layout paint style;pointer-events:none;max-width:320px;}
-      #${BRANCH_MAP_ID}{position:fixed;right:14px;top:88px;z-index:2147482999;width:188px;max-height:min(46vh,420px);overflow:auto;padding:8px;border:1px solid rgba(128,128,128,.34);border-radius:8px;background:color-mix(in srgb, Canvas 92%, CanvasText 8%);color:CanvasText;font:11px/1.25 system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;box-shadow:0 3px 16px rgba(0,0,0,.16);contain:layout paint style;}
-      #${BRANCH_MAP_ID} .cgpt-lb-branch-title{font-weight:700;margin-bottom:6px;}
+      #${NEXT_PROMPT_TOGGLE_BUTTON_ID}{position:fixed;left:14px;top:54px;z-index:2147483000;padding:6px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;background:color-mix(in srgb, Canvas 92%, CanvasText 8%);color:CanvasText;font:11px/1.2 system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;box-shadow:0 2px 10px rgba(0,0,0,.14);cursor:pointer;contain:layout paint style;}
+      #${NEXT_PROMPT_PANEL_ID}{position:fixed;left:14px;top:88px;z-index:2147482999;width:300px;max-height:min(56vh,520px);overflow:auto;padding:9px;border:1px solid rgba(128,128,128,.34);border-radius:8px;background:color-mix(in srgb, Canvas 93%, CanvasText 7%);color:CanvasText;font:11px/1.25 system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;box-shadow:0 3px 16px rgba(0,0,0,.16);contain:layout paint style;}
+      #${NEXT_PROMPT_PANEL_ID}.cgpt-lb-next-mini-panel{width:auto;min-width:82px;max-width:118px;min-height:28px;overflow:hidden;padding:7px 9px;border-radius:999px;cursor:pointer;}
+      #${NEXT_PROMPT_PANEL_ID} .cgpt-lb-next-mini{display:flex;align-items:center;gap:7px;white-space:nowrap;}
+      #${NEXT_PROMPT_PANEL_ID} .cgpt-lb-next-mini-count{font-weight:700;font-size:11px;line-height:1;}
+      #${NEXT_PROMPT_PANEL_ID} .cgpt-lb-next-mini-bars{display:grid;grid-auto-flow:column;gap:2px;align-items:end;height:12px;}
+      #${NEXT_PROMPT_PANEL_ID} .cgpt-lb-next-mini-bars span{display:block;width:3px;height:8px;border-radius:2px;background:color-mix(in srgb, CanvasText 64%, Canvas 36%);}
+      #${NEXT_PROMPT_PANEL_ID} .cgpt-lb-next-mini-bars span:nth-child(2){height:11px;}
+      #${NEXT_PROMPT_PANEL_ID} .cgpt-lb-next-mini-bars span:nth-child(3){height:6px;}
+      #${NEXT_PROMPT_PANEL_ID} .cgpt-lb-next-mini-bars span:nth-child(4){height:10px;}
+      #${NEXT_PROMPT_PANEL_ID} .cgpt-lb-next-panel-header{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:7px;}
+      #${NEXT_PROMPT_PANEL_ID} .cgpt-lb-next-panel-title{font-weight:700;}
+      #${NEXT_PROMPT_PANEL_ID} .cgpt-lb-next-panel-close{width:22px;height:22px;padding:0;border:1px solid rgba(128,128,128,.34);border-radius:999px;background:Canvas;color:CanvasText;font:14px/1 system-ui;cursor:pointer;}
+      #${NEXT_PROMPT_PANEL_ID} .cgpt-lb-next-prompt-row{display:grid;gap:4px;margin:7px 0;}
+      #${NEXT_PROMPT_PANEL_ID} .cgpt-lb-next-prompt-meta{font-weight:600;color:color-mix(in srgb, CanvasText 72%, Canvas 28%);}
+      #${NEXT_PROMPT_PANEL_ID} textarea{width:100%;box-sizing:border-box;resize:vertical;min-height:42px;padding:6px;border:1px solid rgba(128,128,128,.34);border-radius:6px;background:Canvas;color:CanvasText;font:12px/1.35 system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;}
+      #${NEXT_PROMPT_PANEL_ID} .cgpt-lb-next-prompt-remove{justify-self:end;padding:4px 7px;border:1px solid rgba(128,128,128,.34);border-radius:6px;background:Canvas;color:CanvasText;font:11px/1.2 system-ui;cursor:pointer;}
+      #${BRANCH_TOGGLE_BUTTON_ID}{position:fixed;right:14px;top:54px;z-index:2147483000;padding:6px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;background:color-mix(in srgb, Canvas 92%, CanvasText 8%);color:CanvasText;font:11px/1.2 system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;box-shadow:0 2px 10px rgba(0,0,0,.14);cursor:pointer;contain:layout paint style;}
+      #${BRANCH_MAP_ID}{position:fixed;right:14px;top:88px;z-index:2147482999;width:248px;max-height:min(52vh,480px);overflow:auto;padding:9px;border:1px solid rgba(128,128,128,.34);border-radius:8px;background:color-mix(in srgb, Canvas 92%, CanvasText 8%);color:CanvasText;font:11px/1.25 system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;box-shadow:0 3px 16px rgba(0,0,0,.16);contain:layout paint style;}
+      #${BRANCH_MAP_ID}.cgpt-lb-branch-mini{width:auto;min-width:42px;max-width:74px;max-height:180px;overflow:hidden;padding:7px;border-radius:999px;cursor:pointer;}
+      #${BRANCH_MAP_ID} .cgpt-lb-branch-mini-graph{display:grid;grid-template-columns:repeat(2,12px);gap:2px 4px;align-items:center;justify-content:center;}
+      #${BRANCH_MAP_ID} .cgpt-lb-branch-mini-dot{display:block;width:12px;height:12px;padding-left:calc(var(--cgpt-lb-branch-depth,0) * 3px);overflow:hidden;color:color-mix(in srgb, CanvasText 68%, Canvas 32%);font:11px/12px ui-monospace,SFMono-Regular,Consolas,monospace;}
+      #${BRANCH_MAP_ID} .cgpt-lb-branch-mini-alt{color:#3b82f6;}
+      #${BRANCH_MAP_ID} .cgpt-lb-branch-header{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:6px;}
+      #${BRANCH_MAP_ID} .cgpt-lb-branch-title{font-weight:700;}
+      #${BRANCH_MAP_ID} .cgpt-lb-branch-close{width:22px;height:22px;padding:0;border:1px solid rgba(128,128,128,.34);border-radius:999px;background:Canvas;color:CanvasText;font:14px/1 system-ui;cursor:pointer;}
       #${BRANCH_MAP_ID} .cgpt-lb-branch-list{display:grid;gap:3px;}
-      #${BRANCH_MAP_ID} .cgpt-lb-branch-node{display:grid;grid-template-columns:16px minmax(0,1fr) 24px;align-items:center;gap:4px;min-height:18px;}
+      #${BRANCH_MAP_ID} .cgpt-lb-branch-node{display:grid;grid-template-columns:16px minmax(0,1fr) 24px;align-items:center;gap:4px;min-height:18px;padding-left:calc(var(--cgpt-lb-branch-depth,0) * 12px);}
       #${BRANCH_MAP_ID} .cgpt-lb-branch-rail{font-size:12px;text-align:center;color:color-mix(in srgb, CanvasText 70%, Canvas 30%);}
       #${BRANCH_MAP_ID} .cgpt-lb-branch-label{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
       #${BRANCH_MAP_ID} .cgpt-lb-branch-count{text-align:right;color:color-mix(in srgb, CanvasText 62%, Canvas 38%);}
+      #${BRANCH_MAP_ID} .cgpt-lb-branch-detail{margin:0 0 4px calc(20px + var(--cgpt-lb-branch-depth,0) * 12px);padding:4px 6px;border-left:2px solid color-mix(in srgb, CanvasText 32%, Canvas 68%);color:color-mix(in srgb, CanvasText 78%, Canvas 22%);background:color-mix(in srgb, Canvas 86%, CanvasText 14%);border-radius:6px;overflow-wrap:anywhere;}
       #${BRANCH_MAP_ID} .cgpt-lb-branch-user .cgpt-lb-branch-rail{color:#3b82f6;}
       #${BRANCH_MAP_ID} .cgpt-lb-branch-assistant .cgpt-lb-branch-rail{color:#16a34a;}
       @supports (content-visibility:auto){.${CONTAINED_CLASS}:not(.${HIDDEN_CLASS}){content-visibility:auto;contain-intrinsic-size:auto 720px;}}
@@ -3049,6 +3608,7 @@
     hideMathCopyButton();
     hideMathCopyToast();
     hideNextPromptToast();
+    hideNextPromptPanelIfEmpty();
     removeBranchMapPanel();
     navigationTimer = 0;
     maintenanceTimer = 0;
