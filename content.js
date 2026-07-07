@@ -927,13 +927,12 @@
       document.body.appendChild(branchMapPanel);
     }
 
-    const branchCounts = countBranchAlternates(routeState);
     const branchSummaries = buildBranchSummaries(path, routeState);
-    const treeRows = buildConnectedBranchTreeRows(path, routeState, branchCounts, branchSummaries);
+    const summaryRows = buildBranchSummaryRows(branchSummaries);
     branchMapPanel.textContent = "";
 
     if (branchMapCollapsed) {
-      renderBranchMiniOverlay(branchMapPanel, treeRows, branchCounts);
+      renderBranchMiniOverlay(branchMapPanel, summaryRows);
       applyBranchMapCollapsedState();
       return;
     }
@@ -953,41 +952,148 @@
     branchMapPanel.appendChild(header);
 
     const list = document.createElement("div");
-    list.className = "cgpt-lb-branch-list";
-    const summaryRows = buildBranchSummaryRows(branchSummaries);
+    list.className = "cgpt-lb-branch-compare";
     if (!summaryRows.length) {
       const empty = document.createElement("div");
-      empty.className = "cgpt-lb-branch-detail";
+      empty.className = "cgpt-lb-branch-empty";
       empty.textContent = "분기 없음";
       list.appendChild(empty);
+      branchMapPanel.appendChild(list);
+      applyBranchMapCollapsedState();
+      return;
     }
-    for (const row of summaryRows) {
-      const detail = document.createElement("div");
-      detail.className = "cgpt-lb-branch-detail";
+
+    const graph = document.createElement("div");
+    graph.className = "cgpt-lb-branch-graph";
+    const detail = document.createElement("button");
+    detail.type = "button";
+    detail.className = "cgpt-lb-branch-detail";
+    detail.title = "Click to jump to this conversation point";
+    detail.addEventListener("click", () => {
+      const ids = String(detail.dataset.targetIds || "").split("\t").filter(Boolean);
+      jumpToBranchTargets(ids);
+    });
+
+    const renderSelected = (row) => {
+      if (!row) return;
       detail.dataset.targetIds = row.targetIds.join("\t");
-      detail.style.setProperty("--cgpt-lb-branch-depth", String(Math.max(0, row.depth || 0)));
-      detail.textContent = `분기 전: ${row.before || "-"} · 시작: ${row.start || "-"}`;
-      detail.title = "Click to jump to this conversation point";
-      detail.addEventListener("click", () => jumpToBranchTargets(row.targetIds));
-      list.appendChild(detail);
-    }
+      detail.textContent = `분기 전: ${row.before || "-"}\n시작: ${row.start || "-"}`;
+      for (const item of graph.querySelectorAll(".cgpt-lb-branch-split")) {
+        item.classList.remove("cgpt-lb-branch-split-active");
+      }
+      const active = graph.querySelector(`[data-branch-index="${String(row.index)}"]`);
+      if (active) active.classList.add("cgpt-lb-branch-split-active");
+    };
+
+    graph.appendChild(renderBranchGraphSvg(summaryRows, {
+      compact: false,
+      onSelect: renderSelected
+    }));
+
+    list.append(graph, detail);
     branchMapPanel.appendChild(list);
+    renderSelected(summaryRows[0]);
     applyBranchMapCollapsedState();
   }
 
-  function renderBranchMiniOverlay(panel, treeRows, branchCounts) {
+  function renderBranchMiniOverlay(panel, summaryRows) {
     const mini = document.createElement("div");
     mini.className = "cgpt-lb-branch-mini-graph";
     mini.setAttribute("aria-label", "Open branch tree");
-    for (const row of treeRows.slice(-16)) {
-      const dot = document.createElement("span");
-      dot.className = `cgpt-lb-branch-mini-dot${row.branch ? " cgpt-lb-branch-mini-alt" : ""}`;
-      dot.style.setProperty("--cgpt-lb-branch-depth", String(Math.max(0, row.depth || 0)));
-      dot.textContent = row.branch ? "└" : branchCounts[row.node.index] > 1 ? "●" : "○";
-      dot.title = `Node ${Number(row.node.index) + 1}`;
-      mini.appendChild(dot);
+    const rows = Array.isArray(summaryRows) ? summaryRows.slice(0, 5) : [];
+    if (!rows.length) {
+      const empty = document.createElement("span");
+      empty.className = "cgpt-lb-branch-mini-empty";
+      empty.textContent = "○";
+      mini.appendChild(empty);
     }
+    else mini.appendChild(renderBranchGraphSvg(rows, { compact: true }));
     panel.appendChild(mini);
+  }
+
+  function renderBranchGraphSvg(summaryRows, options = {}) {
+    const rows = Array.isArray(summaryRows) ? summaryRows : [];
+    const compact = Boolean(options.compact);
+    const xMain = compact ? 11 : 14;
+    const xBranch = compact ? 34 : 46;
+    const yStep = compact ? 18 : 27;
+    const pad = compact ? 8 : 11;
+    const width = compact ? 46 : 62;
+    const height = Math.max(compact ? 24 : 34, pad * 2 + Math.max(0, rows.length - 1) * yStep);
+    const svg = createSvgElement("svg");
+    svg.setAttribute("class", compact ? "cgpt-lb-branch-svg cgpt-lb-branch-svg-mini" : "cgpt-lb-branch-svg");
+    svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
+    svg.setAttribute("width", String(width));
+    svg.setAttribute("height", String(height));
+    svg.setAttribute("aria-hidden", "true");
+
+    if (rows.length > 1) {
+      const trunk = createSvgElement("path");
+      trunk.setAttribute("class", "cgpt-lb-branch-edge cgpt-lb-branch-edge-trunk");
+      trunk.setAttribute("d", `M ${xMain} ${pad} L ${xMain} ${pad + (rows.length - 1) * yStep}`);
+      svg.appendChild(trunk);
+    }
+
+    rows.forEach((row, index) => {
+      const y = pad + index * yStep;
+      const group = createSvgElement("g");
+      group.setAttribute("class", "cgpt-lb-branch-split");
+      group.setAttribute("data-branch-index", String(row.index));
+      if (!compact) {
+        group.setAttribute("tabindex", "0");
+        group.setAttribute("role", "button");
+      }
+      group.setAttribute("aria-label", `분기 전 ${row.before || "-"} 시작 ${row.start || "-"}`);
+      if (typeof options.onSelect === "function") {
+        group.addEventListener("click", (event) => {
+          if (typeof event.stopPropagation === "function") event.stopPropagation();
+          options.onSelect(row);
+        });
+        group.addEventListener("keydown", (event) => {
+          if (event.key !== "Enter" && event.key !== " ") return;
+          if (typeof event.preventDefault === "function") event.preventDefault();
+          options.onSelect(row);
+        });
+      }
+
+      const hit = createSvgElement("rect");
+      hit.setAttribute("class", "cgpt-lb-branch-hit");
+      hit.setAttribute("x", String(Math.min(xMain, xBranch) - 7));
+      hit.setAttribute("y", String(y - 10));
+      hit.setAttribute("width", String(Math.abs(xBranch - xMain) + 14));
+      hit.setAttribute("height", "20");
+      hit.setAttribute("rx", "6");
+      group.appendChild(hit);
+
+      const edge = createSvgElement("path");
+      edge.setAttribute("class", "cgpt-lb-branch-edge cgpt-lb-branch-edge-fork");
+      const mid = Math.round((xMain + xBranch) / 2);
+      edge.setAttribute("d", `M ${xMain} ${y} C ${mid} ${y - 1}, ${mid} ${y + 1}, ${xBranch} ${y}`);
+      group.appendChild(edge);
+
+      const before = createSvgElement("circle");
+      before.setAttribute("class", "cgpt-lb-branch-node cgpt-lb-branch-node-before");
+      before.setAttribute("cx", String(xMain));
+      before.setAttribute("cy", String(y));
+      before.setAttribute("r", compact ? "3.2" : "4");
+      group.appendChild(before);
+
+      const after = createSvgElement("circle");
+      after.setAttribute("class", "cgpt-lb-branch-node cgpt-lb-branch-node-after");
+      after.setAttribute("cx", String(xBranch));
+      after.setAttribute("cy", String(y));
+      after.setAttribute("r", compact ? "3.2" : "4");
+      group.appendChild(after);
+
+      svg.appendChild(group);
+    });
+
+    return svg;
+  }
+
+  function createSvgElement(tagName) {
+    if (document.createElementNS) return document.createElementNS("http://www.w3.org/2000/svg", tagName);
+    return document.createElement(tagName);
   }
 
   function removeBranchMapPanel() {
@@ -1013,79 +1119,10 @@
     applyBranchMapCollapsedState();
   }
 
-  function countBranchAlternates(routeState) {
-    const counts = {};
-    const byIndex = new Map();
-    const snapshots = routeState && Array.isArray(routeState.snapshots) ? routeState.snapshots : [];
-    for (const snapshot of snapshots) {
-      const ids = Array.isArray(snapshot.ids) ? snapshot.ids : [];
-      ids.forEach((id, index) => {
-        if (!byIndex.has(index)) byIndex.set(index, new Set());
-        byIndex.get(index).add(id);
-      });
-    }
-    for (const [index, values] of byIndex) counts[index] = values.size;
-    return counts;
-  }
-
-  function buildConnectedBranchTreeRows(path, routeState, branchCounts, branchSummaries) {
-    const currentNodes = path.map(compactBranchNode);
-    const rows = currentNodes.map((node) => ({ node, depth: 0, current: true, branch: false }));
-    const inserted = new Set(currentNodes.map((node) => node.id));
-    const variants = collectSnapshotNodes(routeState)
-      .map((nodes) => nodes.map(compactBranchNode))
-      .filter((nodes) => connectedToCurrentPath(nodes, currentNodes));
-
-    for (const nodes of variants) {
-      const divergenceIndex = findFirstDivergenceIndex(nodes, currentNodes);
-      if (divergenceIndex <= 0) continue;
-      let insertAt = findExistingRowInsertIndex(rows, nodes[divergenceIndex - 1].id);
-      for (let index = divergenceIndex; index < nodes.length; index += 1) {
-        const node = nodes[index];
-        if (!node) continue;
-        if (inserted.has(node.id)) {
-          insertAt = findExistingRowInsertIndex(rows, node.id);
-          continue;
-        }
-        const start = node.role === "user" ? node.preview : findFirstUserPromptAtOrAfter(nodes, index) || node.preview;
-        rows.splice(insertAt, 0, {
-          node: {
-            ...node,
-            preview: compactText(start || node.preview || node.id, 64)
-          },
-          depth: Math.max(1, index),
-          current: false,
-          branch: true
-        });
-        inserted.add(node.id);
-        insertAt += 1;
-      }
-    }
-
-    for (const [index, count] of Object.entries(branchCounts)) {
-      const depth = Number(index);
-      const summary = branchSummaries[depth];
-      if (!Number.isFinite(depth) || count < 2 || !summary) continue;
-      const insertAt = findRowInsertIndex(rows, depth);
-      rows.splice(insertAt, 0, {
-        node: {
-          id: `branch-summary-${depth}`,
-          role: "message",
-          index: depth,
-          preview: `분기 전: ${summary.before || "-"} · 시작: ${summary.start || "-"}`
-        },
-        depth: depth + 1,
-        current: false,
-        branch: true,
-        summaryOnly: true
-      });
-    }
-    return rows.filter((row) => row && row.node);
-  }
-
   function buildBranchSummaryRows(branchSummaries) {
     return Object.entries(branchSummaries || {})
       .map(([index, summary]) => ({
+        index: Number(index),
         depth: Number(index) + 1,
         before: summary && summary.before,
         start: summary && summary.start,
@@ -1093,58 +1130,6 @@
       }))
       .filter((row) => row.before || row.start)
       .sort((a, b) => a.depth - b.depth);
-  }
-
-  function connectedToCurrentPath(left, right) {
-    if (arraysEqual(left.map((node) => node.id), right.map((node) => node.id))) return false;
-    return sharedPrefixLength(left, right) > 0;
-  }
-
-  function sharedPrefixLength(left, right) {
-    if (!left.length || !right.length) return 0;
-    const limit = Math.min(left.length, right.length);
-    for (let i = 0; i < limit; i += 1) {
-      if (!left[i] || !right[i] || left[i].id !== right[i].id) return i;
-    }
-    return limit;
-  }
-
-  function findFirstDivergenceIndex(left, right) {
-    const shared = sharedPrefixLength(left, right);
-    if (!shared) return -1;
-    if (shared < Math.min(left.length, right.length)) return shared;
-    if (left.length > right.length) return shared;
-    return -1;
-  }
-
-  function collectSnapshotNodes(routeState) {
-    const snapshots = routeState && Array.isArray(routeState.snapshots) ? routeState.snapshots : [];
-    const rows = [];
-    for (const snapshot of snapshots) {
-      const nodes = Array.isArray(snapshot.nodes)
-        ? snapshot.nodes.map(compactBranchNode)
-        : (Array.isArray(snapshot.ids) ? snapshot.ids.map((id, index) => ({ id, index, role: "message", preview: "" })) : []);
-      if (nodes.length) rows.push(nodes);
-    }
-    if (routeState && Array.isArray(routeState.currentNodes)) rows.push(routeState.currentNodes.map(compactBranchNode));
-    return rows;
-  }
-
-  function findRowInsertIndex(rows, depth) {
-    let index = rows.findIndex((row) => row.node && row.node.index === depth);
-    if (index < 0) return rows.length;
-    index += 1;
-    while (index < rows.length && rows[index].depth > 0 && rows[index].node.index <= depth) index += 1;
-    return index;
-  }
-
-  function findExistingRowInsertIndex(rows, nodeId) {
-    let index = rows.findIndex((row) => row.node && row.node.id === nodeId);
-    if (index < 0) return rows.length;
-    const baseDepth = Number(rows[index].depth) || 0;
-    index += 1;
-    while (index < rows.length && Number(rows[index].depth) > baseDepth) index += 1;
-    return index;
   }
 
   function buildBranchSummaries(path, routeState) {
@@ -1190,21 +1175,11 @@
     return null;
   }
 
-  function findPreviousUserPrompt(nodes, startIndex) {
-    const node = findPreviousUserPromptNode(nodes, startIndex);
-    return node && node.preview || "";
-  }
-
   function findFirstUserPromptNodeAtOrAfter(nodes, startIndex) {
     for (let i = Math.max(0, startIndex); i < nodes.length; i += 1) {
       if (nodes[i] && nodes[i].role === "user" && nodes[i].preview) return nodes[i];
     }
     return null;
-  }
-
-  function findFirstUserPromptAtOrAfter(nodes, startIndex) {
-    const node = findFirstUserPromptNodeAtOrAfter(nodes, startIndex);
-    return node && node.preview || "";
   }
 
   function jumpToBranchTargets(targetIds) {
@@ -1494,13 +1469,14 @@
   }
 
   function clearNextPromptQueue(reason) {
+    const shouldRefreshPanel = Boolean(nextPromptPanel && document.documentElement && document.documentElement.contains(nextPromptPanel));
     nextPromptQueueState = { queued: false, items: [], clearedAt: Date.now(), reason: String(reason || "clear") };
     try {
       sessionStorage.removeItem(NEXT_PROMPT_QUEUE_KEY);
     } catch {
       // Ignore storage cleanup failures.
     }
-    renderNextPromptPanel();
+    if (shouldRefreshPanel) renderNextPromptPanel();
   }
 
   function normalizeNextPromptQueueState(value) {
@@ -1532,7 +1508,7 @@
 
   function renderNextPromptPanel() {
     const state = normalizeNextPromptQueueState(nextPromptQueueState);
-    if (!settings.nextPromptQueueEnabled || !state.items.length) {
+    if (!settings.nextPromptQueueEnabled) {
       hideNextPromptPanelIfEmpty();
       return;
     }
@@ -1577,6 +1553,13 @@
     close.addEventListener("click", toggleNextPromptPanel);
     header.append(title, close);
     nextPromptPanel.appendChild(header);
+
+    if (!state.items.length) {
+      const empty = document.createElement("div");
+      empty.className = "cgpt-lb-next-empty";
+      empty.textContent = "Queue 비어 있음";
+      nextPromptPanel.appendChild(empty);
+    }
 
     state.items.forEach((item, index) => {
       const row = document.createElement("label");
@@ -1664,7 +1647,8 @@
   }
 
   function toggleNextPromptPanel() {
-    nextPromptPanelCollapsed = !nextPromptPanelCollapsed;
+    const hasPanel = Boolean(nextPromptPanel && document.documentElement && document.documentElement.contains(nextPromptPanel));
+    nextPromptPanelCollapsed = hasPanel ? !nextPromptPanelCollapsed : false;
     writeNextPromptPanelCollapsed(nextPromptPanelCollapsed);
     renderNextPromptPanel();
     applyNextPromptPanelCollapsedState();
@@ -2753,25 +2737,39 @@
       #${NEXT_PROMPT_PANEL_ID} .cgpt-lb-next-panel-header{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:7px;}
       #${NEXT_PROMPT_PANEL_ID} .cgpt-lb-next-panel-title{font-weight:700;}
       #${NEXT_PROMPT_PANEL_ID} .cgpt-lb-next-panel-close{width:22px;height:22px;padding:0;border:1px solid rgba(128,128,128,.34);border-radius:999px;background:Canvas;color:CanvasText;font:14px/1 system-ui;cursor:pointer;}
+      #${NEXT_PROMPT_PANEL_ID} .cgpt-lb-next-empty{padding:8px 7px;border:1px dashed rgba(128,128,128,.36);border-radius:6px;color:color-mix(in srgb, CanvasText 66%, Canvas 34%);text-align:center;}
       #${NEXT_PROMPT_PANEL_ID} .cgpt-lb-next-prompt-row{display:grid;gap:4px;margin:7px 0;}
       #${NEXT_PROMPT_PANEL_ID} .cgpt-lb-next-prompt-meta{font-weight:600;color:color-mix(in srgb, CanvasText 72%, Canvas 28%);}
       #${NEXT_PROMPT_PANEL_ID} textarea{width:100%;box-sizing:border-box;resize:vertical;min-height:42px;padding:6px;border:1px solid rgba(128,128,128,.34);border-radius:6px;background:Canvas;color:CanvasText;font:12px/1.35 system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;}
       #${NEXT_PROMPT_PANEL_ID} .cgpt-lb-next-prompt-remove{justify-self:end;padding:4px 7px;border:1px solid rgba(128,128,128,.34);border-radius:6px;background:Canvas;color:CanvasText;font:11px/1.2 system-ui;cursor:pointer;}
       #${BRANCH_TOGGLE_BUTTON_ID}{position:fixed;right:14px;top:54px;z-index:2147483000;padding:6px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;background:color-mix(in srgb, Canvas 92%, CanvasText 8%);color:CanvasText;font:11px/1.2 system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;box-shadow:0 2px 10px rgba(0,0,0,.14);cursor:pointer;contain:layout paint style;}
       #${BRANCH_MAP_ID}{position:fixed;right:14px;top:88px;z-index:2147482999;width:248px;max-height:min(52vh,480px);overflow:auto;padding:9px;border:1px solid rgba(128,128,128,.34);border-radius:8px;background:color-mix(in srgb, Canvas 92%, CanvasText 8%);color:CanvasText;font:11px/1.25 system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;box-shadow:0 3px 16px rgba(0,0,0,.16);contain:layout paint style;}
-      #${BRANCH_MAP_ID}.cgpt-lb-branch-mini{width:auto;min-width:42px;max-width:74px;max-height:180px;overflow:hidden;padding:7px;border-radius:999px;cursor:pointer;}
-      #${BRANCH_MAP_ID} .cgpt-lb-branch-mini-graph{display:grid;grid-template-columns:repeat(2,12px);gap:2px 4px;align-items:center;justify-content:center;}
-      #${BRANCH_MAP_ID} .cgpt-lb-branch-mini-dot{display:block;width:12px;height:12px;padding-left:calc(var(--cgpt-lb-branch-depth,0) * 3px);overflow:hidden;color:color-mix(in srgb, CanvasText 68%, Canvas 32%);font:11px/12px ui-monospace,SFMono-Regular,Consolas,monospace;}
-      #${BRANCH_MAP_ID} .cgpt-lb-branch-mini-alt{color:#3b82f6;}
+      #${BRANCH_MAP_ID}.cgpt-lb-branch-mini{width:auto;min-width:48px;max-width:76px;max-height:170px;overflow:hidden;padding:7px;border-radius:12px;cursor:pointer;}
+      #${BRANCH_MAP_ID} .cgpt-lb-branch-mini-graph{display:flex;align-items:center;justify-content:center;}
+      #${BRANCH_MAP_ID} .cgpt-lb-branch-mini-empty{display:block;width:18px;height:18px;text-align:center;color:color-mix(in srgb, CanvasText 58%, Canvas 42%);font:14px/18px ui-monospace,SFMono-Regular,Consolas,monospace;}
       #${BRANCH_MAP_ID} .cgpt-lb-branch-header{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:6px;}
       #${BRANCH_MAP_ID} .cgpt-lb-branch-title{font-weight:700;}
       #${BRANCH_MAP_ID} .cgpt-lb-branch-close{width:22px;height:22px;padding:0;border:1px solid rgba(128,128,128,.34);border-radius:999px;background:Canvas;color:CanvasText;font:14px/1 system-ui;cursor:pointer;}
-      #${BRANCH_MAP_ID} .cgpt-lb-branch-list{display:grid;gap:3px;}
-      #${BRANCH_MAP_ID} .cgpt-lb-branch-node{display:grid;grid-template-columns:16px minmax(0,1fr) 24px;align-items:center;gap:4px;min-height:18px;padding-left:calc(var(--cgpt-lb-branch-depth,0) * 12px);}
+      #${BRANCH_MAP_ID} .cgpt-lb-branch-compare{display:grid;grid-template-columns:62px minmax(0,1fr);gap:8px;align-items:start;}
+      #${BRANCH_MAP_ID} .cgpt-lb-branch-empty{grid-column:1 / -1;padding:6px 7px;border-left:2px solid color-mix(in srgb, CanvasText 32%, Canvas 68%);background:color-mix(in srgb, Canvas 86%, CanvasText 14%);border-radius:6px;}
+      #${BRANCH_MAP_ID} .cgpt-lb-branch-graph{display:flex;justify-content:center;padding-top:1px;min-width:62px;overflow:visible;}
+      #${BRANCH_MAP_ID} .cgpt-lb-branch-svg{display:block;width:62px;height:auto;overflow:visible;}
+      #${BRANCH_MAP_ID} .cgpt-lb-branch-svg-mini{width:46px;}
+      #${BRANCH_MAP_ID} .cgpt-lb-branch-edge{fill:none;stroke-linecap:round;stroke-linejoin:round;}
+      #${BRANCH_MAP_ID} .cgpt-lb-branch-edge-trunk{stroke:color-mix(in srgb, CanvasText 34%, Canvas 66%);stroke-width:1.4;}
+      #${BRANCH_MAP_ID} .cgpt-lb-branch-edge-fork{stroke:#3b82f6;stroke-width:2;}
+      #${BRANCH_MAP_ID} .cgpt-lb-branch-hit{fill:transparent;}
+      #${BRANCH_MAP_ID} .cgpt-lb-branch-split{cursor:pointer;outline:none;}
+      #${BRANCH_MAP_ID} .cgpt-lb-branch-split-active .cgpt-lb-branch-hit{fill:color-mix(in srgb, #3b82f6 18%, transparent);}
+      #${BRANCH_MAP_ID} .cgpt-lb-branch-split-active .cgpt-lb-branch-edge-fork{stroke-width:2.8;}
+      #${BRANCH_MAP_ID} .cgpt-lb-branch-node{stroke:Canvas;stroke-width:1.5;}
+      #${BRANCH_MAP_ID} .cgpt-lb-branch-node-before{fill:color-mix(in srgb, CanvasText 62%, Canvas 38%);}
+      #${BRANCH_MAP_ID} .cgpt-lb-branch-node-after{fill:#16a34a;}
+      #${BRANCH_MAP_ID} .cgpt-lb-branch-split-active .cgpt-lb-branch-node-after{stroke:#3b82f6;stroke-width:2.2;}
       #${BRANCH_MAP_ID} .cgpt-lb-branch-rail{font-size:12px;text-align:center;color:color-mix(in srgb, CanvasText 70%, Canvas 30%);}
       #${BRANCH_MAP_ID} .cgpt-lb-branch-label{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
       #${BRANCH_MAP_ID} .cgpt-lb-branch-count{text-align:right;color:color-mix(in srgb, CanvasText 62%, Canvas 38%);}
-      #${BRANCH_MAP_ID} .cgpt-lb-branch-detail{margin:0 0 4px calc(20px + var(--cgpt-lb-branch-depth,0) * 12px);padding:4px 6px;border-left:2px solid color-mix(in srgb, CanvasText 32%, Canvas 68%);color:color-mix(in srgb, CanvasText 78%, Canvas 22%);background:color-mix(in srgb, Canvas 86%, CanvasText 14%);border-radius:6px;overflow-wrap:anywhere;cursor:pointer;}
+      #${BRANCH_MAP_ID} .cgpt-lb-branch-detail{width:100%;box-sizing:border-box;min-height:58px;padding:6px 7px;border:1px solid rgba(128,128,128,.24);border-left:2px solid #3b82f6;color:color-mix(in srgb, CanvasText 80%, Canvas 20%);background:color-mix(in srgb, Canvas 86%, CanvasText 14%);border-radius:6px;overflow-wrap:anywhere;white-space:pre-line;text-align:left;font:11px/1.3 system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;cursor:pointer;}
       [data-cgpt-lb-branch-jump="true"]{outline:2px solid #3b82f6!important;outline-offset:4px!important;}
       #${BRANCH_MAP_ID} .cgpt-lb-branch-user .cgpt-lb-branch-rail{color:#3b82f6;}
       #${BRANCH_MAP_ID} .cgpt-lb-branch-assistant .cgpt-lb-branch-rail{color:#16a34a;}

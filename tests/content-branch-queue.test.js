@@ -497,6 +497,19 @@ async function loadContent(storageData = {}, initialSessionValues = {}, options 
   assert.equal(manyTurns[0].classList.contains("cgpt-lb-hidden"), true, "offscreen older message can still collapse");
   assert.equal(manyTurns[9].classList.contains("cgpt-lb-hidden"), false, "newest message remains visible");
 
+  const emptyQueuePage = await loadContent({
+    branchTrackerEnabled: false,
+    nextPromptQueueEnabled: true,
+    nextPromptQueuePanelShortcut: "Alt+Q"
+  });
+  const emptyQueueToggle = createModifiedKeyEvent("q", emptyQueuePage.body, { altKey: true });
+  emptyQueuePage.document.dispatchEvent(emptyQueueToggle);
+  assert.equal(emptyQueueToggle.defaultPrevented, true);
+  const emptyQueuePanel = emptyQueuePage.document.getElementById("cgpt-lb-next-prompt-panel-v152");
+  assert.ok(emptyQueuePanel, "empty queue panel should render");
+  assert.match(emptyQueuePanel.textContent, /Queue 비어 있음/);
+  assert.equal(emptyQueuePanel.querySelectorAll("textarea").length, 0);
+
   const queuePage = await loadContent({
     branchTrackerEnabled: true,
     branchTrackerShortcut: "Alt+B",
@@ -576,10 +589,29 @@ async function loadContent(storageData = {}, initialSessionValues = {}, options 
   const branchedGraph = branchedPage.document.getElementById("cgpt-lb-branch-map-v152");
   assert.match(branchedGraph.textContent, /분기 전: Question 1/);
   assert.match(branchedGraph.textContent, /시작: Question 2 \/ Alternative prompt/);
+  assert.doesNotMatch(branchedGraph.textContent, /분기 전: Question 2/);
+  const splitButtons = branchedGraph.querySelectorAll(".cgpt-lb-branch-split");
+  assert.equal(splitButtons.length, 2, "expanded branch graph shows one marker per branch summary");
+  assert.ok(branchedGraph.querySelector(".cgpt-lb-branch-svg"), "expanded branch graph renders as SVG");
+  assert.ok(splitButtons[0].querySelector(".cgpt-lb-branch-edge-fork"));
+  assert.ok(splitButtons[0].querySelector(".cgpt-lb-branch-node-before"));
+  assert.ok(splitButtons[0].querySelector(".cgpt-lb-branch-node-after"));
+  splitButtons[1].click();
   assert.match(branchedGraph.textContent, /분기 전: Question 2/);
   assert.match(branchedGraph.textContent, /시작: Nested edited branch prompt/);
+  assert.doesNotMatch(branchedGraph.textContent, /시작: Question 2 \/ Alternative prompt/);
   assert.doesNotMatch(branchedGraph.textContent, /Alternative answer/);
   assert.doesNotMatch(branchedGraph.textContent, /Nested edited branch answer/);
+  const branchedToggle = createModifiedKeyEvent("b", branchedPage.body, { altKey: true });
+  branchedPage.document.dispatchEvent(branchedToggle);
+  assert.equal(branchedGraph.classList.contains("cgpt-lb-branch-mini"), true, "branched graph collapses to compare-only mini mode");
+  assert.ok(branchedGraph.querySelector(".cgpt-lb-branch-svg-mini"), "branch mini renders as compact SVG graph");
+  assert.equal(branchedGraph.querySelectorAll(".cgpt-lb-branch-split").length, 2, "branch mini shows one split marker per branch summary");
+  assert.doesNotMatch(branchedGraph.textContent, /Question 1|Question 2|Alternative prompt|Nested edited branch prompt/);
+  const miniSplit = branchedGraph.querySelector(".cgpt-lb-branch-split");
+  branchedGraph.dispatchEvent({ type: "click", target: miniSplit });
+  assert.equal(branchedGraph.classList.contains("cgpt-lb-branch-mini"), false, "clicking the compact graph opens the branch panel");
+  branchedGraph.querySelectorAll(".cgpt-lb-branch-split")[0].click();
   const firstBranchDetail = branchedGraph.querySelector(".cgpt-lb-branch-detail");
   const currentBranchStart = branchedPage.document.querySelector('[data-message-id="u2"]');
   firstBranchDetail.click();
